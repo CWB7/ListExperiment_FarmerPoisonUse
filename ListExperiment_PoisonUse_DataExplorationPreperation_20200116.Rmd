@@ -1,0 +1,1486 @@
+---
+title: "Commercial farmer poison-use in South Africa"
+author: "Christiaan W. Brink"
+date: "16 January 2020"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Poison-use under commercial farmers in South Africa
+
+The use of poison to eliminate predators is causing African vulture populations to collapse. To understand the prevalence and motivations of this practice we conducted an extensive survey with South African commercial farmers. We used a specialised questioning technique, the list experiment (also known as the unmatched count technique), to acquire unbiased data for what is an illegal and therefore sensitive behavior.  
+Below I analyse this data using various modeling approaches to determine poisoning prevalence, predict the probability of individual respondents using poison, determine the main predictors of poison use and examine farmer attitudes to alternative solutions for livestock losses.
+
+I am not able to share the data at this time but please refer to Brink et al. 2021 "Prevalence and drivers of poison use by South African commercial farmers and perceptions of alternative livestock protection measures" in the journal Ambio (https://doi.org/10.1007/s13280-020-01461-2) to review the results.
+
+```{r, eval=FALSE, include=FALSE}
+
+library(devtools)
+#install_url('https://cran.r-project.org/src/contrib/Archive/list/list_9.1.tar.gz')
+#Needed to install list package (contains ict.test) as above because it has been archived and is no longer available on CRAN.
+
+```
+
+```{r, include=FALSE, warning=FALSE}
+rm(list=ls())
+
+# load required libraries
+
+if (!require(lme4)) install.packages("lme4")
+if (!require(tidyverse)) install.packages("tidyverse")
+if (!require(MuMIn)) install.packages("MuMIn")
+if (!require(list)) install.packages("list")
+if (!require(GGally)) install.packages("GGally")
+if (!require(broom)) install.packages("broom")
+if (!require(caret)) install.packages("caret")
+if (!require(parallel)) install.packages("parallel")
+if (!require(mgcv)) install.packages("mgcv")
+if (!require(gstat)) install.packages("gstat")
+if (!require(fasterize)) install.packages("fasterize")
+if (!require(viridis)) install.packages("viridis")
+if (!require(car)) install.packages("car")
+if (!require(PerformanceAnalytics)) install.packages("PerformanceAnalytics")
+if (!require(readr)) install.packages("readr")
+if (!require(sf)) install.packages("sf")
+if (!require(sp)) install.packages("sp")
+if (!require(raster)) install.packages("raster")
+if (!require(spData)) install.packages("spData")
+if (!require(ggspatial)) install.packages("ggspatial")
+if (!require(here)) install.packages("here") #The here function indicates to R where to search for the file based on the top level of the set working directory (given by here())
+
+pck <- c("lme4", "tidyverse", "MuMIn", "list", "GGally", "broom", 
+         "caret", "parallel", "mgcv", "gstat", "fasterize", "viridis", "car", 
+         "PerformanceAnalytics", "readr", "sf", "sp", "raster", "spData", "ggspatial", "here")
+
+lapply(pck, library, character.only= TRUE)
+
+
+# read in data
+
+FSdata <- read.csv(here("Data", "Datasheets", "Farming_Practices_Survey_20200308_Fixed.csv")) # here tells R to search from the top level of the working directory, you then specify the sub directories that R needs to look)
+
+options(scipen = 999) # ensures numbers not expressed as scientific notation
+
+FSdata <- FSdata  %>% mutate(., LS_Fowl_on_farm = ifelse(LS_Fowl_on_farm == 700000, 70000, LS_Fowl_on_farm))
+
+```
+
+# Preparing variables
+
+## Adding Region as variable
+
+```{r}
+
+FSdat <- dplyr::select(FSdata, "Questionnaire_Code", "X", "Y", "CardCode", "UCT_lastYear" )
+
+A3 <- filter(FSdat, CardCode == "A3")
+B4 <- filter(FSdat, CardCode == "B4")
+
+SA <- readRDS(here("Data", "Spatial_data", "SA_baseMaps", "gadm36_ZAF_0_sf.rds"))
+Prov <- readRDS(here("Data", "Spatial_data", "SA_baseMaps","gadm36_ZAF_1_sf.rds"))
+Distr <- readRDS(here("Data", "Spatial_data", "SA_baseMaps","gadm36_ZAF_2_sf.rds"))
+```
+
+### Explore maps
+
+```{r, echo=FALSE}
+
+#Province map
+ggplot(data = Prov["CC_1"]) +
+  geom_sf(fill = "cornsilk") +
+  annotation_scale(location = "br", width_hint = 0.5) +
+  annotation_north_arrow(location = "br", which_north = "true", 
+        pad_x = unit(0.1, "in"), pad_y = unit(0.3, "in"),
+        style = north_arrow_fancy_orienteering) + 
+    geom_point(data = B4, aes(x = X, y = Y), size = 1, 
+        shape = 23, fill = "blue") +
+    geom_point(data = A3, aes(x = X, y = Y), size = 1, 
+        shape = 23, fill = "darkred")
+
+#Dist map
+ggplot(data = Distr["NAME_2"]) +
+  geom_sf(fill = "cornsilk") +
+  annotation_scale(location = "br", width_hint = 0.5) +
+  annotation_north_arrow(location = "br", which_north = "true", 
+        pad_x = unit(0.1, "in"), pad_y = unit(0.3, "in"),
+        style = north_arrow_fancy_orienteering) + 
+    geom_point(data = B4, aes(x = X, y = Y), size = 1, 
+        shape = 23, fill = "blue") +
+    geom_point(data = A3, aes(x = X, y = Y), size = 1, 
+        shape = 23, fill = "darkred")
+
+```
+
+### Join data
+
+```{r, echo = FALSE}
+#make FSdat sf object - set simple geometries with coordinates():
+coordinates(FSdat)<-~X+Y
+
+FSdat <- st_as_sf(FSdat)
+
+#set coordinate system
+st_crs(FSdat)
+st_crs(Distr)
+
+#FSdat <- st_transform(FSdat, st_crs(Distr))
+
+st_crs(FSdat) <- 4326  #set the coordinate reference system for FSdat, NOTE!!! -this does not transform the data!!!! only manualy specifies the crs!!!!!!!!!!!!!
+
+#using sf package:
+
+joina <- st_join(FSdat, left = FALSE, Distr["NAME_1"])
+joina <- st_join(joina, left = FALSE, Distr["NAME_2"])
+joina <- st_join(joina, left = FALSE, Distr["GID_1"])
+joina <- st_join(joina, left = FALSE, Distr["GID_2"])
+
+joina <- joina %>% 
+  as.data.frame(.) %>% 
+  dplyr::select(., -"geometry")
+
+#join variables to main dataframe used for analysis
+
+FSdata <- FSdata %>% 
+  cbind(., District = joina$NAME_2, Province = joina$NAME_1, 
+        TestCode = joina$Questionnaire_Code, Prov_code = joina$GID_1, District_code = joina$GID_2) %>% 
+  dplyr::select(., "Number", "Questionnaire_Code", "TestCode", "District", "Province", everything())
+
+```
+
+## Subsetting data
+
+```{r}
+#fixing some variables
+
+library(naniar)
+
+FSdata <- FSdata %>%  replace_with_na_at(.vars = c("LS_Sheep_losses","LS_Cattle_losses", "LS_GoatLoss_Cost", "LS_Game_on_farm"),
+                     condition = ~.x == "")
+```
+
+```{r subsetting data, include=FALSE}
+
+FSdata <- FSdata %>% 
+  mutate_at(vars(starts_with("LS_")), funs(as.numeric)) %>% #this worked to make selected numeric
+  mutate_at(vars(starts_with("LS_")), ~ replace(., is.na(.), 0)) %>%  # replaces na with 0
+  filter(., Farmer_Type != "Non-commercial") 
+
+#%>% 
+  #filter(., LS_Fowl_on_farm < 700000)
+
+```
+
+# Variables
+
+## Age
+
+```{r}
+
+FSdata %>% dplyr::select(Age) %>%
+  mutate(rown=1:length(Age)) %>% 
+  ggplot(data=.,aes(x=Age,y=rown))+geom_point(size=4,alpha=0.1)+theme_bw()+ ylab("Row number")
+
+hist(as.numeric(FSdata$Age))
+
+plot(FSdata$UCT_lastYear ~ as.numeric(FSdata$Age))
+
+```
+
+## Percentage poiosoning
+
+```{r}
+
+FSdata %>% dplyr::select(PercentagePoisoning) %>%
+  mutate(rown=1:length(PercentagePoisoning)) %>% 
+  ggplot(data=.,aes(x=PercentagePoisoning,y=rown))+geom_point(size=4,alpha=0.1)+theme_bw()+ ylab("Row number")
+
+hist(FSdata$PercentagePoisoning)
+
+plot(FSdata$UCT_lastYear ~ FSdata$PercentagePoisoning)
+
+```
+
+## Preparing MainCause of livestock loss variable
+
+MainC_PredTop2 indicates whether respondent reported Predators as one of their top 2 main causes of livestock losses. I included dogs as Predators as feral dogs cause farmers to poison in many cases.
+
+```{r MainCausePred, echo=FALSE}
+FSdata <- FSdata %>% mutate(., MainCause_stockloss = as.character(MainCause_stockloss)) %>% mutate(., SecondaryCause_stockloss = as.character(SecondaryCause_stockloss))
+
+FSdata <- FSdata %>% mutate(., MainCause_stockloss =
+                    if_else(MainCause_stockloss == "Dogs", "Predators",
+                       if_else(MainCause_stockloss == "Theft", "Theft_poaching",
+                           if_else(MainCause_stockloss == "Poaching", "Theft_poaching",
+                               if_else(MainCause_stockloss == "Stillborn", "Stillborn_Complicaitons",
+                                    if_else(MainCause_stockloss == "Birthing compilications", "Stillborn_Complicaitons",
+                                         if_else(MainCause_stockloss == "Fall in hole", "Injury_falling",
+                                              if_else(MainCause_stockloss == "Injuries", "Injury_falling",
+                                                   if_else(MainCause_stockloss == "Fell down crans", "Injury_falling", MainCause_stockloss)))))))))
+
+FSdata <- FSdata %>% mutate(., SecondaryCause_stockloss =
+                    if_else(SecondaryCause_stockloss == "Dogs", "Predators",
+                       if_else(SecondaryCause_stockloss == "Theft", "Theft_poaching",
+                           if_else(SecondaryCause_stockloss == "Poaching", "Theft_poaching",
+                              if_else(SecondaryCause_stockloss == "Theft or poaching", "Theft_poaching",
+                                if_else(SecondaryCause_stockloss == "Snares", "Theft_poaching",
+                                 if_else(SecondaryCause_stockloss == "Stillborn", "Stillborn_Complicaitons",
+                                    if_else(SecondaryCause_stockloss == "Birth Difficulties", "Stillborn_Complicaitons",
+                                         if_else(SecondaryCause_stockloss == "Fall in hole", "Injury_falling",
+                                              if_else(SecondaryCause_stockloss == "Injuries", "Injury_falling", SecondaryCause_stockloss))))))))))
+
+FSdata <- FSdata %>% mutate(., MainC_PredTop2 = if_else(MainCause_stockloss == "Predators" | SecondaryCause_stockloss == "Predators", "Pred", "Other"))
+
+```
+
+```{r}
+
+#Pecentage of farmers with Predation as part of top 2
+
+FSdata %>% filter(., complete.cases(MainCause_stockloss)) %>% count(., MainCause_stockloss) %>% mutate(., Percentage = n/sum(n)*100) #25.8%
+FSdata %>% filter(., complete.cases(SecondaryCause_stockloss)) %>% count(., SecondaryCause_stockloss) %>% mutate(., Percentage = n/sum(n)*100) #19.8%
+FSdata %>% filter(., complete.cases(MainC_PredTop2)) %>% count(., MainC_PredTop2) %>% mutate(., Percentage = n/sum(n)*100) # 45.5% of farmers have predators as big cause of livestock losses
+
+```
+
+```{r, echo = FALSE}
+
+#MainCPred_expl 
+  
+  FSdata %>% drop_na(., MainCause_stockloss) %>% 
+    count(., MainCause_stockloss) %>% ggplot(., aes(x = reorder(MainCause_stockloss, n), y = n/sum(n)*100)) + 
+  geom_bar(stat = "identity") + 
+       coord_flip() +
+    theme_classic()
+  
+    FSdata %>% drop_na(., SecondaryCause_stockloss) %>% 
+    count(., SecondaryCause_stockloss) %>% 
+      ggplot(., aes(x = reorder(SecondaryCause_stockloss, n), n/sum(n)*100)) + 
+  geom_bar(stat = "identity") + 
+       coord_flip() + 
+      theme_classic()
+
+```
+
+## Preparing %Income Catagory
+
+```{r IncomeCat}
+# Making %income catagorical
+FSdata <- FSdata %>% 
+  mutate(., PercInc_Cont = ifelse(Persentage_income_Cat == "<10%", "1",
+                                    ifelse(Persentage_income_Cat == "10-20%", "1",
+                                           ifelse(Persentage_income_Cat == "20-40%", "2",
+                                                  ifelse(Persentage_income_Cat == "40-60%", "3",
+                                                         ifelse(Persentage_income_Cat == "60-80%", "4",
+                                                                ifelse(Persentage_income_Cat == "80-90%", "5",
+                                                                       ifelse(Persentage_income_Cat == ">90%", "5", "NA"))))))))
+
+FSdata %>% drop_na(., PercInc_Cont) %>% 
+  count(., PercInc_Cont) %>% 
+  mutate(., Percentage = n/sum(n)*100) %>% 
+  ggplot(., aes(x=PercInc_Cont, y=Percentage)) + 
+  geom_bar(stat = "identity") + theme_classic()
+
+# 44.5 % of respondents get more than 80% of their income from livestock farming
+
+plot(FSdata$UCT_lastYear~FSdata$PercInc_Cont)
+hist(as.numeric(FSdata$PercInc_Cont), breaks = 5)
+
+FSdata %>% dplyr::select(PercInc_Cont) %>%
+  mutate(rown=1:length(PercInc_Cont)) %>% 
+  ggplot(data=.,aes(x=PercInc_Cont,y=rown))+geom_point(size=4,alpha=0.1)+theme_bw()+ ylab("Row number")
+
+```
+
+## Education lvl 
+
+Condensing to two variables (High school and less, and Tersiary)
+
+```{r Education lvl}
+table(FSdata$Education_level)
+
+FSdata <- FSdata %>% 
+  mutate(., Edu_lvl= ifelse(Education_level == "None", "Low",
+                                    ifelse(Education_level == "Primary", "Low",
+                                           ifelse(Education_level == "High", "Low",
+                                                  ifelse(Education_level == "Tersiary", "High", "NA")))))
+
+FSdata$Education_level <- factor(FSdata$Education_level, levels = c("None", "Primary", "High", "Tersiary"))
+
+FSdata %>% drop_na(., Edu_lvl) %>% 
+  count(., Edu_lvl) %>% 
+  mutate(., Percentage = n/sum(n)*100) %>% 
+  ggplot(., aes(x=Edu_lvl, y=Percentage)) + 
+  geom_bar(stat = "identity") + theme_classic()
+#  <1% of respondents did not have at least High school
+
+FSdata %>% drop_na(., Education_level) %>% 
+  count(., Education_level) %>% 
+  mutate(., Percentage = n/sum(n)*100) %>% 
+  ggplot(., aes(x=Education_level, y=Percentage)) + 
+  geom_bar(stat = "identity") + theme_classic()
+
+FSdata$Education_level
+                                              
+```
+
+## Farm size
+
+```{r}
+FSdata %>% dplyr::select(Farm_size_ha) %>%
+  mutate(rown=1:length(Farm_size_ha)) %>% 
+  ggplot(data=.,aes(x=Farm_size_ha,y=rown))+geom_point(size=4,alpha=0.1)+theme_bw()+ ylab("Row number")
+
+
+hist(as.numeric(FSdata$Farm_size_ha))
+
+plot(FSdata$UCT_lastYear ~ as.numeric(FSdata$Farm_size_ha))
+
+```
+
+## Attitude_Farmworkers
+
+```{r Attitude_farmworkers}
+
+FSdata %>% dplyr::select(Attitude_Farmworkers) %>%
+  mutate(rown=1:length(Attitude_Farmworkers)) %>% 
+  ggplot(data=.,aes(x=Attitude_Farmworkers,y=rown))+geom_point(size=4,alpha=0.1)+theme_bw()+ ylab("Row number")
+
+hist(as.numeric(FSdata$Attitude_Farmworkers))
+
+plot(FSdata$UCT_lastYear ~ as.numeric(FSdata$Attitude_Farmworkers))
+
+```
+
+## Attitude_Game
+
+```{r Attitude_Game}
+
+FSdata %>% dplyr::select(Attitude_Game) %>%
+  mutate(rown=1:length(Attitude_Game)) %>% 
+  ggplot(data=.,aes(x=Attitude_Game,y=rown))+geom_point(size=4,alpha=0.1)+theme_bw()+ ylab("Row number")
+
+
+hist(as.numeric(FSdata$Attitude_Game))
+
+plot(FSdata$UCT_lastYear ~ as.numeric(FSdata$Attitude_Game))
+
+```
+
+## Attitude_Predators
+
+```{r Attitude_NoPredators}
+
+FSdata %>% dplyr::select(Attitude_NoPredators) %>%
+  mutate(rown=1:length(Attitude_NoPredators)) %>% 
+  ggplot(data=.,aes(x=Attitude_NoPredators,y=rown))+geom_point(size=4,alpha=0.1)+theme_bw()+ ylab("Row number")
+
+
+hist(as.numeric(FSdata$Attitude_NoPredators))
+
+plot(FSdata$UCT_lastYear ~ as.numeric(FSdata$Attitude_NoPredators))
+
+```
+
+## Attitude_WantVultures
+
+```{r Attitude_WantVultures}
+
+FSdata %>% dplyr::select(Attitude_WantVultures) %>%
+  mutate(rown=1:length(Attitude_WantVultures)) %>% 
+  ggplot(data=.,aes(x=Attitude_WantVultures,y=rown))+geom_point(size=4,alpha=0.1)+theme_bw()+ ylab("Row number")
+
+
+hist(as.numeric(FSdata$Attitude_WantVultures))
+
+plot(FSdata$UCT_lastYear ~ as.numeric(FSdata$Attitude_WantVultures))
+
+```
+
+## Attitude_VultSpreadDisease
+
+```{r Attitude_VultSpreadDisease}
+
+FSdata %>% dplyr::select(Attitude_VultSpreadDisease) %>%
+  mutate(rown=1:length(Attitude_VultSpreadDisease)) %>% 
+  ggplot(data=.,aes(x=Attitude_VultSpreadDisease,y=rown))+geom_point(size=4,alpha=0.1)+theme_bw()+ ylab("Row number")
+
+
+hist(as.numeric(FSdata$Attitude_VultSpreadDisease))
+
+plot(FSdata$UCT_lastYear ~ as.numeric(FSdata$Attitude_VultSpreadDisease))
+
+```
+
+## Attitude_VultKillStock
+
+```{r Attitude_VultKillStock}
+
+FSdata %>% dplyr::select(Attitude_VultKillStock) %>%
+  mutate(rown=1:length(Attitude_VultKillStock)) %>% 
+  ggplot(data=.,aes(x=Attitude_VultKillStock,y=rown))+geom_point(size=4,alpha=0.1)+theme_bw()+ ylab("Row number")
+
+
+hist(as.numeric(FSdata$Attitude_VultKillStock))
+
+plot(FSdata$UCT_lastYear ~ as.numeric(FSdata$Attitude_VultKillStock))
+
+```
+
+## Attitude_Total
+
+Converted to one variable
+```{r Attitude, echo=FALSE}
+FSdata <- FSdata %>% 
+  mutate(., Attitude_Predators = Attitude_NoPredators*(-1)) %>% 
+  mutate(., Attitude_VultDontKill = Attitude_VultKillStock*(-1)) %>% 
+  mutate(., Attitude_DontDisease = Attitude_VultSpreadDisease*(-1)) %>% 
+  mutate(., Attitude_Total = rowMeans(. [, c("Attitude_WantVultures", "Attitude_VultDontKill", "Attitude_DontDisease")], na.rm = TRUE))
+
+FSdata$Attitude_Total[FSdata$Attitude_Total == "NaN"] <- "NA"
+FSdata$Attitude_Total <- as.numeric(FSdata$Attitude_Total)
+
+summary(FSdata$Attitude_Farmworkers)
+summary(FSdata$Attitude_Game)
+summary(FSdata$Attitude_Predators)
+summary(FSdata$Attitude_WantVultures)
+summary(FSdata$Attitude_DontDisease)
+summary(FSdata$Attitude_VultDontKill)
+
+FSdata %>% dplyr::select(., starts_with("Attitude_")) %>% 
+   rename(., Farmworkers = Attitude_Farmworkers,
+         Game = Attitude_Game, 
+         Predators = Attitude_Predators, 
+         WantVultures = Attitude_WantVultures,
+         DontDisease = Attitude_DontDisease,
+         VultDontKillk = Attitude_VultDontKill) %>% 
+  gather(., Key, Value,
+         Farmworkers,
+         Game, 
+         Predators, 
+         WantVultures,
+         DontDisease,
+         VultDontKillk) %>% 
+  group_by(., Key) %>% 
+  summarise(., mean_num = mean(Value, na.rm = TRUE),
+            sd_num = sd(Value, na.rm = TRUE),
+            n_num = sum(!is.na(Value)),
+            SE_num = sd(Value, na.rm = TRUE)/sqrt(sum(!is.na(Value)))) %>% 
+  ggplot(., aes(x = Key, y= mean_num)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = mean_num-sd_num, ymax = mean_num+sd_num))
+
+plot(FSdata$UCT_lastYear~FSdata$Attitude_DontDisease)
+plot(FSdata$UCT_lastYear~FSdata$Attitude_VultDontKill)
+plot(FSdata$UCT_lastYear~FSdata$Attitude_WantVultures)
+plot(FSdata$UCT_lastYear~FSdata$Attitude_Total)
+hist(FSdata$Attitude_Total, breaks = 14)
+hist(FSdata$Attitude_WantVultures, breaks = 5)
+hist(FSdata$Attitude_VultDontKill, breaks = 5)
+hist(FSdata$Attitude_DontDisease, breaks = 5)
+
+FSdata %>% dplyr::select(Attitude_Total) %>%
+  mutate(rown=1:length(Attitude_Total)) %>% 
+  ggplot(data=.,aes(x=Attitude_Total,y=rown))+geom_point(size=4,alpha=0.1)+theme_bw()+ ylab("Row number")
+
+```
+
+## Vultures_Use to one variable
+
+This indicates whether farmers find vultures useful on their farm. Variable was excluded in the end because there are too many missing values.
+
+```{r VultUse}
+#Need to double check this - you might be including people that did not answer this question
+
+FSdata <- FSdata %>% 
+  mutate(., VultUse_Total = 
+           (Vult_clean + Vult_StockDeathLocations + Vult_StopDisease + Vult_Tourists)/
+           (as.numeric(!is.na(Vult_clean)) + as.numeric(!is.na(Vult_StockDeathLocations)) + as.numeric(!is.na(Vult_StopDisease)) + as.numeric(!is.na(Vult_Tourists))))
+
+# the actually could have done the above differently not using the as.numeric as this is 1 - 0 data, thought it was likert scale which is why I used the as.numeric mithod to make TRUE's  = 1 (could have used some rowSum(na.rm = TRUE) fuctnion probably)
+
+plot(FSdata$UCT_lastYear~FSdata$VultUse_Total)
+hist(FSdata$VultUse_Total, breaks =5) 
+
+FSdata %>% dplyr::select(VultUse_Total) %>%
+  mutate(rown=1:length(VultUse_Total)) %>% 
+  ggplot(data=.,aes(x=VultUse_Total,y=rown))+geom_point(size=4,alpha=0.1)+theme_bw()+ ylab("Row number")
+
+```
+
+## Frequency_Vulture to numeric variable
+
+This is a measure of how often farmers see vultures on their farms.
+
+```{r FreqVult}
+FSdata <- FSdata %>% 
+  mutate(., FreqVult= ifelse(Frequency_Vultures == "Never", 0,
+                                    ifelse(Frequency_Vultures == "<1pM", 1,
+                                           ifelse(Frequency_Vultures == "1pM", 2, 
+                                                  ifelse(Frequency_Vultures == "1pW", 3,
+                                                         ifelse(Frequency_Vultures == "Every day", 4, "NA"))))))
+
+
+
+FSdata %>% drop_na(., FreqVult) %>% 
+  count(., FreqVult) %>% 
+  mutate(., Percentage = n/sum(n)*100) %>% 
+  ggplot(., aes(x=FreqVult, y=Percentage)) + 
+  geom_bar(stat = "identity") + theme_classic()
+
+hist(as.numeric(FSdata$FreqVult), breaks = 5)
+plot(FSdata$UCT_lastYear~ as.numeric(FSdata$FreqVult))
+
+FSdata %>% dplyr::select(FreqVult) %>%
+  mutate(rown=1:length(FreqVult)) %>% 
+  ggplot(data=.,aes(x=FreqVult,y=rown))+geom_point(size=4,alpha=0.1)+theme_bw()+ ylab("Row number")
+
+```
+
+## TreatmentControl
+
+This variable indicates whether reondent was part of the control or treatment group.
+
+```{r CardType}
+
+FSdata <- FSdata %>% 
+  mutate(., TreatmentControl = 
+           ifelse(CardCode == "A3", "T", "C")) #Treatment = T, Control = C
+
+FSdata <- FSdata %>% 
+  mutate(., TreatmentControl_Binary = 
+           ifelse(CardCode == "A3", "1", "0")) #Treatment = 1, Control = 0 this is for the ict.test
+
+FSdata$TreatmentControl_Binary <- as.numeric(FSdata$TreatmentControl_Binary)
+
+```
+
+## Livestock variables
+
+```{r LS Aswered Question, include=FALSE}
+
+### Column indicating who had aswered LS (Livestock question):
+FSdata$LS_AnsweredQ <- with(FSdata, ifelse(LS_Sheep_on_Farm > 0 , 1, 
+                                           ifelse(LS_Cattle_on_farm > 0, 1, 
+                                                  ifelse(LS_Goat_on_farm > 0, 1, 
+                                                         ifelse(LS_Game_on_farm > 0, 1, 
+                                                                ifelse(LS_Pigs_on_farm > 0, 1, 
+                                                                       ifelse(LS_Horse_on_farm > 0, 1,
+                                                                              ifelse(LS_Donkeys_on_Farm > 0, 1,
+                                                                                     ifelse(LS_Fowl_on_farm > 0, 1, "0")))))))))
+
+
+#FSdata$LS_AnsweredQ <- as.factor(FSdata$LS_AnsweredQ)
+
+FSdata$LS_Sheep_on_Farm[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_Sheep_losses[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_SheepLoss_Cost[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_Sheep_predator_losses[FSdata$LS_AnsweredQ == 0] <- "NA"
+
+FSdata$LS_Cattle_on_farm[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_Cattle_losses[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_CattleLoss_Cost[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_Cattle_predator_losses[FSdata$LS_AnsweredQ == 0] <- "NA"
+
+FSdata$LS_Goat_on_farm[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_Goat_losses[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_GoatLoss_Cost[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_Goat_predator_losses[FSdata$LS_AnsweredQ == 0] <- "NA"
+
+FSdata$LS_Game_on_farm[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_Game_losses[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_GameLoss_Cost[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_Game_predator_losses[FSdata$LS_AnsweredQ == 0] <- "NA"
+
+FSdata$LS_Pigs_on_farm[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_Pigs_losses[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_PigsLoss_Cost[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_Pigs_predator_losses[FSdata$LS_AnsweredQ == 0] <- "NA"
+
+FSdata$LS_Horse_on_farm[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_Horse_losses[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_HorseLoss_Cost[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_Horse_predator_losses[FSdata$LS_AnsweredQ == 0] <- "NA"
+
+FSdata$LS_Donkeys_on_Farm[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_Donkeys_losses[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_DonkeyLoss_cost[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_Donkeys_Predator_loss[FSdata$LS_AnsweredQ == 0] <- "NA"
+
+FSdata$LS_Fowl_on_farm[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_Fowl_losses[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_FowlLoss_Cost[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$LS_Fowl_predator_losses[FSdata$LS_AnsweredQ == 0] <- "NA"
+
+FSdata <- FSdata %>% 
+  mutate_at(vars(starts_with("LS_")), funs(as.numeric))
+
+```
+
+```{r Livestock variables}
+
+# amalgemating livestock into catagories
+
+FSdata <- FSdata %>%  
+  mutate(All_smallstock = LS_Sheep_on_Farm + LS_Goat_on_farm)
+
+FSdata <- FSdata %>% 
+  mutate(PredLoss_small = LS_Sheep_predator_losses + LS_Goat_predator_losses)
+
+FSdata <- FSdata %>% 
+  mutate(Losses_small = LS_Sheep_losses + LS_Goat_losses)
+
+FSdata <- FSdata %>%
+  mutate(PropPred_SmallS = PredLoss_small/(All_smallstock + PredLoss_small))
+
+FSdata <- FSdata %>% 
+  mutate(All_largestock = LS_Cattle_on_farm + LS_Game_on_farm + LS_Horse_on_farm + LS_Donkeys_on_Farm)
+
+FSdata <- FSdata %>% 
+  mutate(Losses_large = LS_Donkeys_losses + LS_Horse_losses + LS_Game_losses + LS_Cattle_losses)
+
+FSdata <- FSdata %>%
+  mutate(PredLoss_large = LS_Cattle_predator_losses + LS_Game_predator_losses + LS_Horse_predator_losses + LS_Donkeys_Predator_loss)
+
+FSdata <- FSdata %>%
+  mutate(PropPred_Larges = PredLoss_large/(All_largestock + PredLoss_large))
+
+FSdata <- FSdata %>% 
+  mutate(All_Livestock = All_smallstock + All_largestock + LS_Fowl_on_farm + LS_Pigs_on_farm)
+
+FSdata <- FSdata %>% 
+  mutate(Losses_all = Losses_large + Losses_small + LS_Fowl_losses + LS_Pigs_losses)
+
+FSdata <- FSdata %>%
+  mutate(PredLoss_all = PredLoss_small + PredLoss_large + LS_Pigs_predator_losses + LS_Fowl_predator_losses)
+
+FSdata <- FSdata %>% 
+  mutate(PropPred_all = PredLoss_all/ (All_Livestock + PredLoss_all))
+
+FSdata <-FSdata %>% 
+  mutate(prop_stock_small = All_smallstock/All_Livestock)
+
+# Extra catagories
+FSdata <-FSdata %>% 
+  mutate(All_factoryLS = LS_Fowl_on_farm + LS_Pigs_on_farm)
+FSdata <-FSdata %>% 
+  mutate(PredLoss_Factory = LS_Pigs_predator_losses + LS_Fowl_predator_losses)
+FSdata <-FSdata %>% 
+  mutate(All_LS_notFactory = All_smallstock + All_largestock)
+
+FSdata <- FSdata %>% 
+  mutate_at(vars(starts_with("PropPred_SmallS")), ~ replace(., is.na(.), 0)) %>%
+  mutate_at(vars(starts_with("PropPred_SmallS")), ~ replace(., is.nan(.), 0)) %>%
+  mutate_at(vars(starts_with("PropPred_SmallS")), ~ replace(., is.infinite(.), 0)) %>%
+  mutate_at(vars(starts_with("PropPred_Larges")), ~ replace(., is.na(.), 0)) %>%
+  mutate_at(vars(starts_with("PropPred_Larges")), ~ replace(., is.nan(.), 0)) %>%
+  mutate_at(vars(starts_with("PropPred_Larges")), ~ replace(., is.infinite(.), 0)) %>%
+  mutate_at(vars(starts_with("PropPred_all")), ~ replace(., is.na(.), 0)) %>%
+  mutate_at(vars(starts_with("PropPred_all")), ~ replace(., is.nan(.), 0)) %>%
+  mutate_at(vars(starts_with("PropPred_all")), ~ replace(., is.infinite(.), 0)) %>%
+  mutate_at(vars(starts_with("All_")), funs(as.numeric)) %>% 
+  mutate_at(vars(starts_with("PredLoss_")), funs(as.numeric)) %>% 
+  mutate_at(vars(starts_with("PropPred_")), funs(as.numeric)) %>% 
+  mutate_at(vars(starts_with("prop_stock")), funs(as.numeric)) 
+
+FSdata$PropPred_SmallS[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$PropPred_Larges[FSdata$LS_AnsweredQ == 0] <- "NA"
+FSdata$PropPred_all[FSdata$LS_AnsweredQ == 0] <- "NA"
+
+
+ test <- arrange(FSdata, desc(All_Livestock))
+ 
+ #Proportion of small stock
+ # Smallstock/Largestock OR Smallstock/Allstock?
+ 
+# test <- FSdata %>% dplyr::filter(., LS_Sheep_on_Farm == 0 & LS_Cattle_on_farm == 0 & LS_Goat_on_farm == 0 & LS_Game_on_farm == 0 & LS_Horse_on_farm == 0 & LS_Donkeys_on_Farm == 0)
+# 
+# test <- FSdata %>% dplyr::filter(., LS_Fowl_on_farm > 100000) # outlying chicken farmer has 400 head of cattle etc
+# test <- FSdata %>% dplyr::filter(., LS_Fowl_on_farm > 0) # 17 people with chickens
+# test <- FSdata %>% dplyr::filter(., FSdata$LS_Pigs_on_farm > 0) # 21 have pigs only about 4 or 5 are real pig farmers
+# 
+# test$LS_Pigs_on_farm
+ 
+ FSdata %>% dplyr::select(All_Livestock) %>%
+  mutate(rown=1:length(All_Livestock)) %>% 
+  ggplot(data=.,aes(x=All_Livestock,y=rown))+geom_point(size=4,alpha=0.1)+theme_bw()+ ylab("Row number")
+ 
+  FSdata %>% dplyr::select(All_Livestock) %>% filter(All_Livestock < 13000) %>% 
+  mutate(rown=1:length(All_Livestock)) %>% 
+  ggplot(data=.,aes(x=All_Livestock,y=rown))+geom_point(size=4,alpha=0.1)+theme_bw()+ ylab("Row number")
+
+```
+
+
+```{r Livestock variable exploration}
+
+LS <- FSdata %>% dplyr::select(., starts_with("LS_")) %>% 
+   rename(., Sheep =  LS_Sheep_on_Farm, Cattle =  LS_Cattle_on_farm, Goat =  LS_Goat_on_farm, 
+          Game =  LS_Game_on_farm, Pigs =  LS_Pigs_on_farm, Horses = LS_Horse_on_farm, 
+          Donkeys =  LS_Donkeys_on_Farm, Fowl =  LS_Fowl_on_farm) %>% 
+  gather(., Key, Count, Sheep, Cattle, Goat, Game, Pigs, Horses, Donkeys, Fowl) %>% 
+  filter(., complete.cases(Count)) %>% filter(., Count < 500000 & Count > -1)  
+  
+ggplot(LS, aes(x = Key, y = Count)) + 
+  geom_boxplot()
+
+  # geom_jitter(col = "grey")
+
+LS_sum <- FSdata %>% dplyr::select(., starts_with("All_")) %>% 
+  gather(., Key, Count, All_Livestock, All_largestock, All_smallstock) %>% 
+  filter(., complete.cases(Count)) %>% filter(., Count < 5000 & Count > 0)
+
+ggplot(LS_sum, aes(x = Key, y = log(Count))) + 
+  geom_boxplot()
+
+PropP <- FSdata %>% dplyr::select(., starts_with("PropPred_")) %>% 
+  gather(., Key, Count, PropPred_all, PropPred_Larges, PropPred_SmallS) %>% 
+  mutate(., Count = as.numeric(Count)) %>% 
+  filter(., complete.cases(Count)) %>% filter(., Count < 0.1 & Count > 0)  
+
+ggplot(PropP, aes(x = Key, y = Count)) + 
+  geom_boxplot()
+
+
+
+```
+
+## PropPred_all
+
+```{r}
+hist(as.numeric(FSdata$PropPred_all), breaks = 5)
+plot(FSdata$UCT_lastYear~ as.numeric(FSdata$PropPred_all))
+
+FSdata %>% dplyr::select(PropPred_all) %>%
+  mutate(rown=1:length(PropPred_all)) %>% 
+  ggplot(data=.,aes(x=as.numeric(PropPred_all),y=rown))+geom_point(size=4,alpha=0.1)+theme_bw()+ ylab("Row number")
+
+```
+
+## prop_stock_small
+
+```{r}
+hist(as.numeric(FSdata$prop_stock_small), breaks = 5)
+plot(FSdata$UCT_lastYear~ as.numeric(FSdata$prop_stock_small))
+
+FSdata %>% dplyr::select(prop_stock_small) %>%
+  mutate(rown=1:length(prop_stock_small)) %>% 
+  ggplot(data=.,aes(x=as.numeric(prop_stock_small),y=rown))+geom_point(size=4,alpha=0.1)+theme_bw()+ ylab("Row number")
+
+```
+
+## PredPrev_NonL
+
+Techniques for Predator control
+Not including financial compensation as there is little faith in this method because of our government and does not relate to farming technique employed by the farmers themselves.
+
+```{r}
+
+FSdata$PredPrev_AnsweredQ <- with(FSdata, ifelse(!is.na(PredatorPrevention_GaurdingAnimals), 1, 
+                                          ifelse(!is.na(PredatorPrevention_Deterents), 1, 
+                                          ifelse(!is.na(PredatorPrevention_DeadlyControl), 1, 
+                                          ifelse(!is.na(PredatorPrevention_NonDeadly_control), 1, 
+                                          ifelse(!is.na(PredatorPrevention_Only_problem_individuals), 1, 
+                                          ifelse(!is.na(PredatorPrevention_Infrastrukture), 1,
+                                          ifelse(!is.na(PredatorPrevention_FinancialCompensation), 1, "NA"))))))))
+
+FSdata$PredPrev_AnsweredQ <- as.numeric(FSdata$PredPrev_AnsweredQ)
+
+table(FSdata$PredPrev_AnsweredQ)
+
+
+FSdata <- FSdata %>% 
+  mutate(., PredPrev_NonL_Mean = 
+           as.numeric(rowMeans(.[, c("PredatorPrevention_GaurdingAnimals", "PredatorPrevention_Deterents", 
+                          "PredatorPrevention_NonDeadly_control", "PredatorPrevention_Infrastrukture")], na.rm = TRUE))) 
+
+FSdata$PredPrev_NonL_Mean[FSdata$PredPrev_NonL_Mean == "NaN"] <- "NA"
+FSdata$PredPrev_NonL_Mean <- as.numeric(FSdata$PredPrev_NonL_Mean)
+
+FSdata$PredPrev_NonL_Mean
+
+sum(complete.cases(FSdata$PredPrev_NonL_Mean))
+sum(complete.cases(FSdata$PredPrev_AnsweredQ))
+sum(complete.cases(FSdata$PredatorPrevention_DeadlyControl))
+
+mean(FSdata$PredPrev_NonL_Mean, na.rm = TRUE)
+
+
+#Plotting data
+
+FSdata %>% dplyr::select(., starts_with("PredatorPrevention")) %>% 
+   rename(., GaurdingAnimals = PredatorPrevention_GaurdingAnimals,
+         Deterents = PredatorPrevention_Deterents, 
+         NonDeadly = PredatorPrevention_NonDeadly_control, 
+         Infrastructure = PredatorPrevention_Infrastrukture,
+         Deadly = PredatorPrevention_DeadlyControl,
+         Prob_Indiv = PredatorPrevention_Only_problem_individuals,
+         Financial_Compensation = PredatorPrevention_FinancialCompensation) %>% 
+  gather(., Key, Count,
+         GaurdingAnimals,
+         Deterents, 
+         NonDeadly, 
+         Infrastructure,
+         Deadly,
+         Prob_Indiv,
+         Financial_Compensation) %>% 
+  ggplot(., aes(x = Key, y = Count)) + 
+  geom_boxplot() 
+  # geom_jitter(col = "grey")
+
+FSdata %>% dplyr::select(., starts_with("PredatorPrevention")) %>% 
+   rename(., GaurdingAnimals = PredatorPrevention_GaurdingAnimals,
+         Deterents = PredatorPrevention_Deterents, 
+         NonDeadly = PredatorPrevention_NonDeadly_control, 
+         Infrastructure = PredatorPrevention_Infrastrukture,
+         Deadly = PredatorPrevention_DeadlyControl,
+         Prob_Indiv = PredatorPrevention_Only_problem_individuals,
+         Financial_Compensation = PredatorPrevention_FinancialCompensation) %>% 
+  gather(., Key, Count,
+         GaurdingAnimals,
+         Deterents, 
+         NonDeadly, 
+         Infrastructure,
+         Deadly,
+         Prob_Indiv,
+         Financial_Compensation) %>% 
+  group_by(., Key) %>% 
+  summarise(., mean_num = mean(Count, na.rm = TRUE),
+            sd_num = sd(Count, na.rm = TRUE),
+            n_num = sum(!is.na(Count)),
+            SE_num = sd(Count, na.rm = TRUE)/sqrt(sum(!is.na(Count)))) %>% 
+  ggplot(., aes(x = Key, y= mean_num)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = mean_num-sd_num, ymax = mean_num+sd_num))
+
+hist(FSdata$PredPrev_NonL_Mean)
+plot(FSdata$UCT_lastYear~FSdata$PredPrev_NonL_Mean)  
+
+FSdata %>% dplyr::select(PredPrev_NonL_Mean) %>% 
+  mutate(rown=1:length(PredPrev_NonL_Mean)) %>% 
+  ggplot(data=.,aes(x=PredPrev_NonL_Mean,y=rown))+geom_point(size=4,alpha=0.1)+theme_bw()+ ylab("Row number")
+
+
+```
+
+## Exploring small scale farmers for possible exclusion (exclusion done above "non-commercial")
+
+```{r, include=FALSE}
+
+LiveSubset <- FSdata %>% subset(., All_Livestock < 100) %>% 
+  arrange(., All_Livestock) %>% 
+  dplyr::select(., Number, Questionnaire_Code, Sampling_Town, Farmer_Type, All_smallstock, All_largestock, All_Livestock)
+
+hist(LiveSubset$All_Livestock, breaks = 100)
+
+LiveSubset %>% dplyr::select(All_Livestock) %>%
+  mutate(rown=1:length(All_Livestock)) %>% 
+  ggplot(data=.,aes(x=All_Livestock,y=rown))+geom_point(size=4,alpha=0.1)+theme_bw()+ ylab("Row number")
+
+```
+
+# Subset data
+Only select variables of interest: (some wrong class, make them numeric again)
+
+```{r Selecting variables}
+
+FSdata1 <- FSdata %>% dplyr::select(
+  Questionnaire_Code, 
+  X,
+  Y,
+  District,
+  Province,
+  UCT_fiveYears, 
+  UCT_lastYear, 
+  TreatmentControl, 
+  TreatmentControl_Binary, 
+  Age, 
+  Edu_lvl, 
+  PercInc_Cont, 
+  Farm_size_ha, 
+  MainC_PredTop2, 
+  Attitude_Farmworkers, 
+  Attitude_Game, 
+  Attitude_Predators, 
+  Attitude_Total, 
+  Attitude_VultDontKill,
+  Attitude_DontDisease,
+  Attitude_WantVultures,
+  VultUse_Total, 
+  PercentagePoisoning, 
+  All_smallstock, 
+  All_largestock, 
+  All_Livestock, 
+  All_factoryLS,
+  All_LS_notFactory,
+  PropPred_SmallS, 
+  PropPred_Larges, 
+  PropPred_all, 
+  PredLoss_all, 
+  PredLoss_small,
+  PredLoss_large, 
+  PredLoss_Factory,
+  FreqVult, 
+  District, 
+  Province, 
+  Prov_code, 
+  District_code, 
+  PredPrev_NonL_Mean, 
+  prop_stock_small)
+
+FSdata1 <- FSdata1 %>%
+  mutate_at(., c("Age", "PercInc_Cont", "Farm_size_ha", "Attitude_Farmworkers", "Attitude_Game", "Attitude_Predators", "Attitude_Total", 
+  "Attitude_VultDontKill", "Attitude_DontDisease", "Attitude_WantVultures", "VultUse_Total", "PercentagePoisoning", "All_smallstock", 
+  "All_largestock", "All_Livestock", "All_factoryLS", "All_LS_notFactory", "PropPred_SmallS", "PropPred_Larges", "PropPred_all", 
+  "PredLoss_all", "PredLoss_small", "PredLoss_large", "PredLoss_Factory", "FreqVult", "PredPrev_NonL_Mean", "prop_stock_small"), as.numeric)
+
+```
+
+
+```{r, include=FALSE}
+#How many observations per town and province?
+# town-level summary
+FSdata %>% 
+  group_by(Sampling_Town) %>%
+  summarise(count=length(UCT_lastYear))
+
+```
+
+##  Percentage that voluntarily admitted to poison use:
+
+```{r Voluntary poison admission}
+
+sum(FSdata$PoisonUse_Admission, na.rm = TRUE) / nrow(FSdata) * 100  # 9.5 % volunteered that they use poison
+sum(is.na(FSdata$PoisonUse_Admission))
+
+sum(FSdata$PoisonUse_Admission, na.rm = TRUE) #78 people
+sum(FSdata$SneuklithPoison, na.rm = TRUE) #13 cases
+sum(FSdata$Temmik, na.rm = TRUE) #14 cases
+sum(FSdata$TenEighty, na.rm = TRUE) #3 cases
+sum(FSdata$Strignien, na.rm = TRUE) #1 case
+sum(FSdata$Insecticide, na.rm = TRUE) #9 cases
+sum(FSdata$Herbicide, na.rm = TRUE) #1 case
+sum(FSdata$Xylotol, na.rm = TRUE) #1 case
+sum(FSdata$Cyanide, na.rm = TRUE) #1 case
+sum(FSdata$AnimalDip, na.rm = TRUE) #1 case
+
+```
+
+## Check for outliers in response variable
+
+```{r Outliers}
+
+# Create dotchart
+FSdata1 %>% dplyr::select(UCT_lastYear) %>%
+  mutate(rown=1:length(UCT_lastYear)) %>% 
+  ggplot(data=.,aes(x=UCT_lastYear,y=rown))+geom_point(size=4,alpha=0.1)+theme_bw()+ ylab("Row number") # Two full counts with 5, eight counts with 0 (why excluede these?)
+
+FSdata1 %>% dplyr::select(UCT_fiveYears) %>%
+  mutate(rown=1:length(UCT_fiveYears)) %>% 
+  ggplot(data=.,aes(x=UCT_fiveYears,y=rown))+geom_point(size=4,alpha=0.1)+theme_bw()+ ylab("Row number")
+
+FSdata2 <- FSdata1
+
+# Get rid of the abovementioned outliers
+# FSdata2 <- FSdata1 %>% filter(UCT_lastYear < 5 & UCT_lastYear > 0)
+#scratch that -DONT get rid of these outliers
+
+```
+
+# overall prevalence of poisoning
+
+```{r Baseline Poison Prevalence}
+
+Treatment <- FSdata %>% filter(CardCode == "A3")
+T <- mean(Treatment$UCT_lastYear)
+
+
+Control <- FSdata %>% filter(CardCode == "B4")
+C <- mean(Control$UCT_lastYear)
+
+T-C # poisoning prevalence is simply T-C which relates to 22.2% poisoning (Wimbush & Dalton 1997, "Base rate for employee theft: Convergence of Multiple Methods)
+
+
+# According to Whytock et al. baseline poisoning prevalence is calculated as: "We used linear mixed-effects models to analyse UCT data. The baseline, average hunting prevalence in the population was first estimated for each UCT question by including card type (treatment or control) as a fixed effect and n list items as the response. Village was included as a random intercept to account for pseudoreplication (n = 19 villages). Prevalence was calculated as the percentage change from the intercept (control card) to the estimate for the treatment card" - sure sure how to do this? Its a poison model so the coeeficients need to be exp()- due to being logged by the model.
+
+Prevalence_glm1 <- glm(UCT_lastYear ~ TreatmentControl, family = poisson, data = FSdata)
+
+summary(Prevalence_glm1) # default for poisson glm is to model LOG and you thus need to convert coeficients
+
+coef(Prevalence_glm1) # count increases by exp(0.1187928) - when treatment is added (remember poisson distribution logs automatically)
+
+glm1_coef <- coef(Prevalence_glm1)
+glm1_coef[2]
+
+
+Treatment <- FSdata2 %>% filter(TreatmentControl == "T")
+T <- mean(Treatment$UCT_lastYear)
+
+
+Control <- FSdata2 %>% filter(TreatmentControl == "C")
+C <- mean(Control$UCT_lastYear)
+
+T-C # excluding outliers the poisoning prevalence is 21.5%
+
+```
+
+# Check univariate relationships 
+
+## Quantitative variables
+
+```{r}
+
+# Quantitative variables
+FSdata_Numeric <- FSdata2 %>% dplyr::select_if(is.numeric)
+
+FSdata_Numeric <- FSdata_Numeric %>% gather(key="pred",value="value",-c(UCT_lastYear, UCT_fiveYears))
+  
+#standardize variables
+FSdata_Numeric <- FSdata_Numeric %>%  group_by(pred) %>%
+  mutate(value=as.numeric(scale(value))) 
+  
+# create univariate scatterplots
+ggplot(data=FSdata_Numeric,aes(x=value,y=UCT_lastYear))+geom_point(size=2,alpha=0.1)+
+  theme_bw()+facet_wrap(~pred,scales="free")
+
+```
+
+## Categorical variables
+
+```{r}
+
+# Categorical variables (violin plots)
+FSdata_Cat <- FSdata2 %>% 
+  dplyr::select(UCT_lastYear, Edu_lvl, MainC_PredTop2) %>%
+  gather(key="pred",value="value",-c(UCT_lastYear), na.rm = TRUE)
+
+# create univariate scatterplots
+ggplot(data=FSdata_Cat,aes(x=value,y=UCT_lastYear))+
+  geom_violin()+theme_bw()+
+  facet_wrap(~pred,scales="free")+xlab("")
+
+```
+
+
+```{r}
+# Check collinearity (for continuous variables) 
+
+FSdata2 %>% dplyr::select_if(is.numeric) %>%
+  dplyr::select(-c(UCT_lastYear, UCT_fiveYears)) %>% 
+  cor(., use = "complete.obs")
+
+```
+
+```{r}
+
+# Check collinearity (for continuous variables) (plot)
+FSdata2 %>% dplyr::select_if(is.numeric) %>% 
+  dplyr::select(-c(UCT_lastYear, UCT_fiveYears)) %>% 
+  ggcorr(.)
+
+# should consider removing Farm_size variable and PropPred_all due to collinearity
+
+```
+
+```{r}
+FSdata2 %>% dplyr::select_if(is.numeric) %>% 
+  dplyr::select(-c(UCT_lastYear, UCT_fiveYears)) %>% 
+  chart.Correlation(., histogram = FALSE, pch=19, cex = 6)
+
+# exclude All_smallstcok and All_largestock
+
+```
+
+Pairs plots
+```{r Pairs plot, include=FALSE}
+cex.lab <- 2; cex.axis <-1.5
+par(mar = c(5, 5, 1, 2))
+pairs(~UCT_lastYear + All_largestock + All_smallstock + PercentagePoisoning, data = FSdata2, cex.axis=cex.axis, cex.lab=cex.lab)
+
+```
+
+# Modeling
+
+Variables included in the model:
+
+UCT_lastYear, TreatmentControl, Age, Edu_lvl, PercInc_Cont, Farm_size_ha, MainC_PredTop2, Attitude_Farmworkers, Attitude_Game, Attitude_Predators, Attitude_Total, PercentagePoisoning, All_smallstock, PropPred_SmallS, All_largestock, PropPred_Larges, All_Livestock, PropPred_all
+
+Create dataframe for analyses (scale continuous predictors)
+
+```{r}
+
+# scale continous predictors- why do you need to scale these?
+
+# FSdata3 <- FSdata2 %>%
+#   mutate_at(., c("Age","PercInc_Cont", "Farm_size_ha", "Attitude_Farmworkers", "Attitude_Game", "Attitude_Predators",
+#        "Attitude_Total", "VultUse_Total", "PercentagePoisoning", "All_smallstock", "PropPred_SmallS", "All_largestock",
+#        "PropPred_Larges", "All_Livestock", "FreqVult", "PropPred_all", "PredPrev_NonL_Mean", "prop_stock_small"), funs(as.numeric))
+
+
+FSdata3 <- FSdata2 %>%
+  mutate_at(., c("Age", "PercInc_Cont", "Farm_size_ha", "Attitude_Farmworkers", "Attitude_Game", "Attitude_Predators", 
+                 "Attitude_Total", "VultUse_Total", "PercentagePoisoning", "All_smallstock", "PropPred_SmallS", "All_largestock",
+                 "PropPred_Larges", "All_Livestock", "FreqVult", "PropPred_all", "PredPrev_NonL_Mean", "prop_stock_small"), funs(as.numeric))
+
+#variables all seem fine but some have too many missing values to include
+sum(!complete.cases(FSdata3$Age)) #3
+sum(!complete.cases(FSdata3$Edu_lvl)) #0
+sum(!complete.cases(FSdata3$PercInc_Cont)) #0
+sum(!complete.cases(FSdata3$Farm_size_ha)) #10
+sum(!complete.cases(FSdata3$Attitude_Farmworkers)) #25
+sum(!complete.cases(FSdata3$Attitude_Game)) #5
+sum(!complete.cases(FSdata3$Attitude_Predators)) #4
+sum(!complete.cases(FSdata3$Attitude_Total)) #3
+sum(!complete.cases(FSdata3$FreqVult)) #3
+sum(!complete.cases(FSdata3$PredPrev_NonL_Mean)) #210
+sum(!complete.cases(FSdata3$PercentagePoisoning)) #25
+sum(!complete.cases(FSdata3$All_Livestock)) #0
+sum(!complete.cases(FSdata3$PropPred_all)) #0
+sum(!complete.cases(FSdata3$prop_stock_small)) #0
+sum(!complete.cases(FSdata3$VultUse_Total)) #128
+
+# FSdata3 <- FSdata3 %>%  mutate(PercentagePoisoning=as.numeric(scale(PercentagePoisoning)),
+#        Age=as.numeric(scale(Age)),
+#        All_smallstock=as.numeric(scale(All_smallstock)),
+#        PropPred_SmallS=as.numeric(scale(PropPred_SmallS)),
+#        All_largestock=as.numeric(scale(All_largestock)),
+#        PropPred_Larges=as.numeric(scale(PropPred_Larges)),
+#        All_Livestock=as.numeric(scale(All_Livestock)),
+#        FreqVult=as.numeric(scale(FreqVult)),
+#        prop_stock_small=as.numeric(scale(prop_stock_small)),
+#        PredPrev_NonL_Mean=as.numeric(scale(PredPrev_NonL_Mean)),
+#        PropPred_all=as.numeric(scale(PropPred_all)),
+#        PercInc_Cont=as.numeric(scale(PercInc_Cont)),
+#        Farm_size_ha=as.numeric(scale(Farm_size_ha)),
+#        Attitude_Farmworkers=as.numeric(scale(Attitude_Farmworkers)),
+#        Attitude_Game=as.numeric(scale(Attitude_Game)), 
+#        Attitude_Predators=as.numeric(scale(Attitude_Predators)),
+#        Attitude_Total=as.numeric(scale(Attitude_Total)),
+#        VultUse_Total=as.numeric(scale(VultUse_Total)))
+
+#FSdata3 <- dplyr::select(FSdata3, -VultUse_Total)
+
+sum(complete.cases(FSdata3))  # only 615 rows without NAs
+
+sum(!complete.cases(FSdata3)) # 197 rows with NAs are these excluded in the model?
+
+#If I exclude the VultUse_Total variable then I have 731 complete cases and only 81 with NAs
+
+write.csv(FSdata3, here("Outputs", "Data_output", "FSdata3_forModels_20200810.csv"))
+
+```
+
+
+## Model fitting
+Fit a GLM and GLMM with region as a random effect. Region is included as a random effect because of
+pseudo-replication (not necessarily related to spatial autocorrelation). For the GLMM one interaction was
+excluded it would cause non-convergence (because of design does match the analyses of interactions between
+two factorial variables.)
+
+```{r}
+
+# Fit a saturated GLM (no interactions)
+mod<-glm(UCT_lastYear ~ Age + 
+        Edu_lvl + 
+        PercInc_Cont + 
+        Farm_size_ha +
+        MainC_PredTop2 +
+        Attitude_Farmworkers +
+        Attitude_Game +
+        Attitude_Predators +
+        Attitude_Total +
+        PercentagePoisoning +
+        All_Livestock +
+        PropPred_all +
+        FreqVult +
+        prop_stock_small + 
+        PredPrev_NonL_Mean,
+          family=poisson,data=FSdata3)
+
+
+# you can make the glm use NAs by adding the function na.action = na.pass to the model
+
+summary(mod)
+
+# pretty output
+broom::tidy(mod)
+
+```
+
+```{r}
+# Fit a saturated GLM (with all possible interactions)
+
+FSdata_mod1 <- FSdata3 %>% dplyr::select(., UCT_lastYear, TreatmentControl, TreatmentControl_Binary, Age, Edu_lvl, PercInc_Cont, MainC_PredTop2, Attitude_Farmworkers, Attitude_Game, Attitude_Predators, Attitude_Total, PercentagePoisoning, All_Livestock, PropPred_all, FreqVult, prop_stock_small, PredPrev_NonL_Mean)
+  
+FSdata_mod1 <- FSdata_mod1[complete.cases(FSdata_mod1), ]
+
+mod1<-glm(UCT_lastYear ~Age*TreatmentControl +
+        Edu_lvl*TreatmentControl +
+        PropPred_Larges*TreatmentControl,
+          family=poisson,data=FSdata3, na.action = "na.fail")
+
+pdd <- dredge(mod1,rank="AIC")
+summary(pdd)
+
+
+mod1<-glm(UCT_lastYear ~Age*TreatmentControl +
+        Edu_lvl*TreatmentControl +
+        PercInc_Cont*TreatmentControl +
+        MainC_PredTop2*TreatmentControl +
+        Attitude_Farmworkers*TreatmentControl +
+        Attitude_Game*TreatmentControl +
+        Attitude_Predators*TreatmentControl +
+        Attitude_Total*TreatmentControl +
+        PercentagePoisoning*TreatmentControl +
+        All_Livestock*TreatmentControl +
+        PropPred_all*TreatmentControl +
+        FreqVult*TreatmentControl +
+        prop_stock_small*TreatmentControl +
+        PredPrev_NonL_Mean*TreatmentControl,
+          family=poisson,data=FSdata_mod1, na.action= "na.fail")
+
+ddd <- dredge(mod1)
+
+summary(ddd)
+
+summary(mod1)
+
+# pretty output
+broom::tidy(mod1)
+
+```
+
+```{r}
+# Fit a saturated GLMM (with region as a random effect and all possible interactions)
+
+## Region -  would that be province in my case? in which case I will have to go through all 822 coordinates and specify which province they are in
+mod1<-glmer(UCT_lastYear ~ Age*TreatmentControl +
+        Edu_lvl*TreatmentControl +
+        PercInc_Cont*TreatmentControl +
+        Farm_size_ha*TreatmentControl +
+        MainC_PredTop2*TreatmentControl +
+        Attitude_Farmworkers*TreatmentControl +
+        Attitude_Game*TreatmentControl +
+        Attitude_Predators*TreatmentControl +
+        Attitude_Total*TreatmentControl +
+        VultUse_Total*TreatmentControl +
+        PercentagePoisoning*TreatmentControl +
+        All_smallstock*TreatmentControl +
+        PropPred_SmallS*TreatmentControl +
+        All_largestock*TreatmentControl +
+        PropPred_Larges*TreatmentControl +
+        All_Livestock*TreatmentControl +
+        PropPred_all*TreatmentControl+(1|Region),
+        family=poisson,data=FSdata3,na.action= "na.fail")
+
+```
+
+#############################################################################################
+
+Model selection for GLM
+
+Create model selection table using a multicore version of dredge. Save model selection object for convenience.
+Models are ranked using BIC.
+
+```{r}
+
+# set up local cluster (7 cores)
+clusterType <- if(length(find.package("snow", quiet = TRUE))) "SOCK" else "PSOCK"
+clust <- try(makeCluster(getOption("cl.cores", 7), type = clusterType))
+
+# export data and libraries
+clusterExport(clust, "FSdata3")
+clusterCall(clust, "library", "lme4", character.only = TRUE)
+
+# create model selection table
+pdd <- pdredge(mod1, cluster = clust,rank="BIC")
+
+# stop cluster
+stopCluster(clust)
+
+# save model selection object
+saveRDS(pdd,file="C:/Users/Christiaan W Brink/OneDrive - University of Cape Town/Chpt3_PoisonUse_Survey/Chpt3_Analysis/dredgeres.rds")
+
+```
+
+
+Model averaging and variable importance for GLMM
+
+```{r}
+
+pdd <- readRDS("/mnt/data1tb/Dropbox/Andrea/Kenya/results/dredgeres.rds")
+avgmod.95p <- model.avg(pdd, cumsum(weight) <= .95,fit=T)
+
+# model averaged parameters
+data.frame(variable=row.names(summary(avgmod.95p)$coefmat.full),
+summary(avgmod.95p)$coefmat.full) %>%
+  as_tibble() %>%
+  write_csv(.,path="/mnt/data1tb/Dropbox/Andrea/Kenya/results/COEFFICIENTS.csv")
+
+# variable relative importance
+tibble(variable=names(importance(avgmod.95p)),value=importance(avgmod.95p)) %>%
+  write_csv(.,path="/mnt/data1tb/Dropbox/Andrea/Kenya/results/VARIABLEIMPORTANCE.csv")
+
+```
+
+Further checks
+
+Using a couple of non-linear modelling methods to check whether the R2 goes up for the saturated model
+and whether the predictive performance of the variables is acceptable.
+
+```{r}
+
+# Fit Generalized additive model (full model)
+mod1<-gam(N_Behav~s(Accessibility)+AgeContinuous+s(DistPA_km)+s(NcattlePred)+
+            s(NsmallPred)+AttitudePred+Income2Classes+ConservancyMember+
+            Compensation+MainCauseDeath+AttitudeVult+WildlifeAct,family=poisson,data=dat3)
+
+# Predictive performance using a machine lerning approach with cross-validation.
+train_control <- trainControl(method="repeatedcv", number=5, repeats=3)
+
+model <- train(N_Behav~Accessibility+AgeContinuous
+               +NsmallPred+AttitudePred+Income2Classes+
+                 ConservancyMember+Compensation+MainCauseDeath+
+                 AttitudeVult+WildlifeAct, data=dat3,
+               trControl=train_control, method="rf",metric="RSME")
+
+```
+
+#############################################################################################
+Model selection for GLMM
+
+Create model selection table using a multicore version of dredge. Save model selection object for convienence.
+Models are ranked using BIC.
+
+```{r}
+
+# set up local cluster (7 cores)
+clusterType <- if(length(find.package("snow", quiet = TRUE))) "SOCK" else "PSOCK"
+clust <- try(makeCluster(getOption("cl.cores", 7), type = clusterType))
+
+# export data and libraries
+clusterExport(clust, "dat3")
+clusterCall(clust, "library", "lme4", character.only = TRUE)
+
+# create model selection table
+pdd <- pdredge(mod1, cluster = clust,rank="BIC")
+
+# stop cluster
+stopCluster(clust)
+
+# save model selection object
+saveRDS(pdd,file="/mnt/data1tb/Dropbox/Andrea/Kenya/results/dredgeres.rds")
+
+```
+
+
+Model averaging and variable importance for GLMM
+
+```{r}
+
+readRDS("/mnt/data1tb/Dropbox/Andrea/Kenya/results/dredgeres.rds")->pdd
+avgmod.95p <- model.avg(pdd, cumsum(weight) <= .95,fit=T)
+
+# model averaged parameters
+data.frame(variable=row.names(summary(avgmod.95p)$coefmat.full),
+summary(avgmod.95p)$coefmat.full) %>%
+  as_tibble() %>%
+  write_csv(.,path="/mnt/data1tb/Dropbox/Andrea/Kenya/results/COEFFICIENTS.csv")
+
+# variable relative importance
+tibble(variable=names(importance(avgmod.95p)),value=importance(avgmod.95p)) %>%
+  write_csv(.,path="/mnt/data1tb/Dropbox/Andrea/Kenya/results/VARIABLEIMPORTANCE.csv")
+
+```
+
+Further checks
+
+Using a couple of non-linear modelling methods to check whether the R2 goes up for the saturated model
+and whether the predictive performance of the variables is acceptable.
+
+```{r}
+
+# Fit Generalized additive model (full model)
+mod1<-gam(N_Behav~s(Accessibility)+AgeContinuous+s(DistPA_km)+s(NcattlePred)+
+            s(NsmallPred)+AttitudePred+Income2Classes+ConservancyMember+
+            Compensation+MainCauseDeath+AttitudeVult+WildlifeAct,family=poisson,data=dat3)
+
+# Predictive performance using a machine lerning approach with cross-validation.
+train_control <- trainControl(method="repeatedcv", number=5, repeats=3)
+
+model <- train(N_Behav~Accessibility+AgeContinuous
+               +NsmallPred+AttitudePred+Income2Classes+
+                 ConservancyMember+Compensation+MainCauseDeath+
+                 AttitudeVult+WildlifeAct, data=dat3,
+               trControl=train_control, method="rf",metric="RSME")
+
+```
+
+Variance explained for GAM = 5.13 % and cross-validated R2 squared for Random Forest = 8%
+
+## Mapping
+
+Mapping is done using raw values. Unlike previous analyses we are not interpolating the probability of
+occurence of an event, so it is fine to use raw counts.
+
+```{r}
+
+library(sf)
+library(fasterize)
+library(raster)
+library(phylin)
+
+# read in study area shapefile - this would be for the whole of SA
+# starea <- st_read("C:/Users/Christiaan W Brink/OneDrive - University of Cape Town/Chpt3_PoisonUse_Survey/Chpt3_Analysis/Chpt3_Analysis/PoisonMaps/SA_baseMaps/gadm36_ZAF_2_sf.rds",quiet=T)
+
+starea <- readRDS("C:/Users/Christiaan W Brink/OneDrive - University of Cape Town/Chpt3_PoisonUse_Survey/Chpt3_Analysis/Chpt3_Analysis/PoisonMaps/SA_baseMaps/gadm36_ZAF_2_sf.rds")
+
+# rasterize study area get out coordinates for raster
+starear <- fasterize(starea,raster(extent(starea), res=0.01)) 
+
+# convert into spatial points dataframe
+tmp <- na.exclude(data.frame(coordinates(starear),value=getValues(starear)))
+coordinates(tmp)<-~x+y
+gridded(tmp)<-TRUE
+
+# convert poisoing data into sp object
+obs <- FSdata %>% dplyr::select(X, Y,UCT_lastYear)
+coordinates(obs)<-~X+Y
+
+# perform idw
+idwres <- idw(formula = UCT_lastYear ~ 1, locations = obs, newdata = tmp)
+
+idwres <- idw(values = UCT_lastYear ~ 1, coords = obs$coords, newdata = tmp)
+
+idw(values = obs$UCT_lastYear ~ 1, coords = obs[, 2:3], grid)
+    
+    # method = "Shepard", p = 2, R = 2, N = 15,
+    # distFUN = geo.dist, ...)
+
+```
+
+## [inverse distance weighted interpolation]
+
+```{r}
+
+# write out raster
+raster(idwres) %>%
+writeRaster(.,filename = "C:/Users/Christiaan W Brink/OneDrive - University of Cape Town/Chpt3_PoisonUse_Survey/Chpt3_Analysis/Chpt3_Analysis/PoisonMaps/interpolation1km.tif",
+overwrite=T)
+
+# create map
+as_tibble(idwres) %>%
+
+# convert into raster
+ggplot(.,aes(x=x,y=y,fill=var1.pred))+geom_raster()+scale_fill_viridis()+theme_bw()+
+theme(legend.title=element_blank())
+
+```
+
+```{r}
+
+knitr::knit_exit()
+
+```

@@ -1,0 +1,1778 @@
+---
+title: "Chpt3_NLSmodels7_20201028_Clean"
+author: "CWBrink_list"
+date: "28/10/2020"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Poison-use under commercial farmers in South Africa
+
+The use of poison to eliminate predators is causing African vulture populations to collapse. To understand the prevalence and motivations of this practice we conducted an extensive survey with South African commercial farmers. We used a specialized questioning technique, the list experiment (also known as the unmatched count technique), to acquire unbiased data for what is an illegal and therefore sensitive behavior.Farmers were questioned about whether they have used poison over the past year and separately whether they have used poison in the last five years. Seperate anlaysis were conducted for the one year and the five year peroids.
+
+I am not able to share the data at this time but please refer to Brink et al. 2021 "Prevalence and drivers of poison use by South African commercial farmers and perceptions of alternative livestock protection measures" in the journal Ambio. (https://doi.org/10.1007/s13280-020-01461-2) to review the results.
+
+Below I analyse this data using various modeling approaches to determine poisoning prevalence, predict the probability of individual respondents using poison, determine the main predictors of poison use and examine farmer attitudes to alternative solutions for livestock losses.Analysis follows the methods of the following papers:
+- "List Experiments with Measurement Error" Blair and Imai 2019, Political Analysis
+- "Statistical Analysis of List Experiments" Blair and Imai 2012, Political Analysis
+- "Multivariate regression analysis for the item count technique" Imai 2011, Political Analysis
+
+Originally Maximum Likelihood models were attempted but these struggled to converge and a non-linear least squares approach was adopted. 
+
+```{r Load data and packages}
+
+rm(list=ls())
+
+if (!require(lme4)) install.packages("lme4")
+if (!require(tidyverse)) install.packages("tidyverse")
+if (!require(MuMIn)) install.packages("MuMIn")
+if (!require(list)) install.packages("list")
+if (!require(GGally)) install.packages("GGally")
+if (!require(broom)) install.packages("broom")
+if (!require(caret)) install.packages("caret")
+if (!require(parallel)) install.packages("parallel")
+if (!require(mgcv)) install.packages("mgcv")
+if (!require(gstat)) install.packages("gstat")
+if (!require(fasterize)) install.packages("fasterize")
+if (!require(viridis)) install.packages("viridis")
+if (!require(car)) install.packages("car")
+if (!require(PerformanceAnalytics)) install.packages("PerformanceAnalytics")
+if (!require(readr)) install.packages("readr")
+if (!require(sf)) install.packages("sf")
+if (!require(sp)) install.packages("sp")
+if (!require(raster)) install.packages("raster")
+if (!require(spData)) install.packages("spData")
+if (!require(ggspatial)) install.packages("ggspatial")
+if (!require(here)) install.packages("here")
+if (!require(here)) install.packages("xtable")
+
+pck <- c("lme4", "tidyverse", "MuMIn", "list", "GGally", "broom", 
+         "caret", "parallel", "mgcv", "gstat", "fasterize", "viridis", "car", 
+         "PerformanceAnalytics", "readr", "sf", "sp", "raster", "spData", 
+         "ggspatial", "here", "xtable")
+
+lapply(pck, library, character.only= TRUE)
+
+# read in data
+
+FSdata3 <- read_csv(here("Outputs", "Data_output", "FSdata3_forModels_20200810.csv"))
+FSdata3 <- as.data.frame(FSdata3)
+
+options(scipen=999)
+
+```
+
+```{r Set factor levels}
+
+FSdata3$Edu_lvl <- factor(FSdata3$Edu_lvl, levels = c("Low", "High"))
+FSdata3$MainC_PredTop2 <- factor(FSdata3$MainC_PredTop2, levels = c("Other", "Pred"))
+
+fs.data <- FSdata3
+
+```
+
+# Checking model assumptions
+
+In this section I evaluate whether any model assumptions are contravened.
+
+Assumptions (Blair and Imai 2012):
+1) Inclusion of sensitive item has no effect on respondents' answers to corntrol items (i.e. no design effect)
+2) Respondents give truthful answers for sensitive items (i.e. no liars - ceiling and floor effects / strategic measurement error)
+
+Under these two assumptions a standard difference in means estimator yields unbiased estimate of population proportion participating in sensitive behavior.
+
+For Maximum likelihood models specifically (Blair et al 2019):
+3) No non-strategic measurement error (e.g. respondents randomly reporting number of behaviors [uniform error]/ or just giving max number of behaviors[top-biased error])
+-such behaviors can induce severe model misspecification biases, especially when underlying trait is rare.
+Blair et al 2019 provide new method for detecting and alleviating model misspecification bias.
+
+
+## Testing design effect
+
+Tests indicate that there is no evidence of design effect (i.e. the inclusion of the sensitive item to the list does not change the response rates for the control items in the list experiment).
+
+### One year period
+```{r Design effect}
+
+#Last year
+
+test.value.fs.data <- ict.test(y = fs.data$UCT_lastYear, treat = fs.data$TreatmentControl_Binary, J = 4, alpha = 0.05, gms = TRUE, pi.table = TRUE)
+print(test.value.fs.data)
+
+#  0.5552002 = no design effect
+```
+
+### Five year period
+```{r Design effect 5Y}
+#Five years
+
+FiveY <- fs.data %>% filter(UCT_fiveYears != "NA")
+
+Fyear.test.value.fs.data <- ict.test(y = FiveY$UCT_fiveYears, treat = FiveY$TreatmentControl_Binary, J = 4, alpha = 0.05, gms = TRUE, pi.table = TRUE)
+print(Fyear.test.value.fs.data)
+
+# 0.5443943 = no design effect
+
+```
+
+
+## Preliminary check for ceiling and floor effects
+
+An indication of ceiling and floor effects would be a high percentage of respondents replying 0 or 4 (they thus avoid giving truthful answers that will give away their answer to the sensitive item).
+
+Frequency table for Responses:
+
+### One year period
+```{r Freq table}
+# Last year
+Treat_freq <- FSdata3 %>% filter(., TreatmentControl == "T") %>% dplyr::select(., UCT_lastYear) %>% 
+  count(UCT_lastYear) %>% 
+  mutate(Treatment_perc = prop.table(n)*100) %>% 
+  rename(., Response = UCT_lastYear, Treatment_n = n)
+
+Freq_table <- FSdata3 %>% filter(., TreatmentControl == "C") %>% dplyr::select(., UCT_lastYear) %>% 
+  count(UCT_lastYear) %>% 
+  mutate(Control_perc = prop.table(n)*100) %>% 
+  rename(., Response = UCT_lastYear, Control_n = n) %>% 
+  full_join(., Treat_freq, by = "Response")
+  
+Control_n <- Freq_table$Control_n
+Control_perc <- Freq_table$Control_perc
+Treatment_n <- Freq_table$Treatment_n
+Treatment_perc <- Freq_table$Treatment_perc
+  
+Freq_table <- add_row(Freq_table, Control_n = sum(Control_n, na.rm = TRUE), Control_perc = sum(Control_perc, na.rm = TRUE), Treatment_n = sum(Treatment_n), Treatment_perc = sum(Treatment_perc))
+
+write.table(Freq_table, file = here("Outputs", "Data_output", "UCT_FreqTable.csv"), row.names = F, sep = ",")
+
+Freq_table
+
+```
+
+### Five year period
+```{r}
+# Last 5years###################################################################
+
+Treat_freq5y <- FSdata3 %>% filter(., TreatmentControl == "T") %>% dplyr::select(., UCT_fiveYears) %>% 
+  filter(UCT_fiveYears != "NA") %>% 
+  count(UCT_fiveYears) %>% 
+  mutate(Treatment_perc = prop.table(n)*100) %>% 
+  rename(., Response = UCT_fiveYears, Treatment_n = n)
+
+Freq_table5y <- FSdata3 %>% filter(., TreatmentControl == "C") %>% dplyr::select(., UCT_fiveYears) %>% 
+  count(UCT_fiveYears) %>% 
+  mutate(Control_perc = prop.table(n)*100) %>% 
+  rename(., Response = UCT_fiveYears, Control_n = n) %>% 
+  full_join(., Treat_freq5y, by = "Response")
+  
+Control_n5y <- Freq_table5y$Control_n
+Control_perc5y <- Freq_table5y$Control_perc
+Treatment_n5y <- Freq_table5y$Treatment_n
+Treatment_perc5y <- Freq_table5y$Treatment_perc
+  
+Freq_table5y <- add_row(Freq_table5y, Control_n = sum(Control_n5y, na.rm = TRUE), Control_perc = sum(Control_perc5y, na.rm = TRUE), Treatment_n = sum(Treatment_n5y), Treatment_perc = sum(Treatment_perc5y))
+
+Freq_table5y
+
+write.table(Freq_table5y, file = here("Outputs", "Data_output", "UCT_5years_FreqTable.csv"), row.names = F, sep = ",")
+
+```
+
+
+# Overall poisoning prevalence
+
+A simple difference in means linear model is used to determine overall poisoning prevalence. 
+Overall poisoning prevalence was caluculated to be 21.9% (95%CI= 11.6%-32.2%)
+
+## One year period poisoning prevalence
+```{r PoisoningPrevalence 1Y}
+# One year period
+
+diff.means.results <- ictreg(formula = UCT_lastYear ~ 1, data = FSdata3, treat = "TreatmentControl_Binary", J = 4, method = "lm")
+summary(diff.means.results)
+#sensitive item intercept = 0.219 (SE 0.05249)
+
+Overal_prevalence <- data.frame(
+  outcome = "poison", method = "dim", 
+  predict(diff.means.results, se.fit = T, avg = T, interval = "confidence", level = 0.95)$fit)
+
+Overal_prevalence
+
+# overall prevalence: Fit=0.2191623 CIlwr= 0.1161362 CIupr=0.3221883 ~ linear model so no conversion  ~ 22% of farmers poison
+```
+
+## Five year period poisoning prevalence
+```{r PoisoningPrevalence5Y}
+# Five year period
+
+diff.means.results.5y <- ictreg(formula = UCT_fiveYears ~ 1, data = FSdata3, treat = "TreatmentControl_Binary", J = 4, method = "lm")
+summary(diff.means.results.5y )
+#sensitive item intercept = 0.30768 (SE 0.05621)
+
+Overal_prevalence.5y  <- data.frame(
+  outcome = "poison", method = "dim", 
+  predict(diff.means.results.5y , se.fit = T, avg = T, interval = "confidence", level = 0.95)$fit)
+
+Overal_prevalence.5y 
+
+# overall prevalence: Fit=0.3076754 CIlwr= 0.1973462 CIupr=0.4180045 ~ linear model so no conversion  ~ 31% of farmers poison
+
+```
+
+
+# Preparing variables for multivariate regression analysis
+
+All continuous variables were logged (high variability in data) and scaled.
+
+```{r Variable prep}
+
+log.g <- c("PercentagePoisoning", "Attitude_Game", "Attitude_Total", "Attitude_Predators", "Attitude_Farmworkers", "Attitude_VultDontKill", "Attitude_DontDisease", "Attitude_WantVultures", "Age", "PercInc_Cont", "All_LS_notFactory", "All_largestock", "All_smallstock", "All_factoryLS", "PropPred_all", "PredLoss_all", "PredLoss_small", "PredLoss_large", "PredLoss_Factory", "prop_stock_small", "Farm_size_ha", "FreqVult")
+
+m.data <-  fs.data %>% mutate(
+    Farm_size_ha = Farm_size_ha + 1,
+    All_LS_notFactory = All_LS_notFactory + 1,
+    All_smallstock = All_smallstock + 1,
+    All_largestock = All_largestock + 1,
+    All_factoryLS = All_factoryLS + 1,
+    prop_stock_small = prop_stock_small + 1,
+    PropPred_all = PropPred_all + 1,   
+    Attitude_Farmworkers = Attitude_Farmworkers + 3,
+    Attitude_VultDontKill = Attitude_VultDontKill + 3,
+    Attitude_DontDisease = Attitude_DontDisease + 3,
+    Attitude_WantVultures = Attitude_WantVultures + 3,
+    PredLoss_all = PredLoss_all + 1,   
+    PredLoss_small = PredLoss_small + 1,   
+    PredLoss_large = PredLoss_large + 1,   
+    PredLoss_Factory = PredLoss_Factory + 1,   
+    PercentagePoisoning = PercentagePoisoning + 1,
+    Attitude_Game = Attitude_Game + 3,
+    Attitude_Predators = Attitude_Predators + 3,
+    Attitude_Total = Attitude_Total + 3,
+    FreqVult = FreqVult + 1) %>%
+  mutate_at(., setNames(log.g, paste0("log_", log.g)), log)
+
+m.data <- m.data %>%  mutate(
+  log_Age=as.numeric(scale(log_Age)),
+  log_Farm_size_ha=as.numeric(scale(log_Farm_size_ha)),
+  log_PercInc_Cont=as.numeric(scale(log_PercInc_Cont)),
+  log_All_LS_notFactory=as.numeric(scale(log_All_LS_notFactory)),
+  log_All_smallstock=as.numeric(scale(log_All_smallstock)),
+  log_All_largestock=as.numeric(scale(log_All_largestock)),
+  log_All_factoryLS=as.numeric(scale(log_All_factoryLS)),
+  log_prop_stock_small=as.numeric(scale(log_prop_stock_small)),
+  log_PropPred_all=as.numeric(scale(log_PropPred_all)),
+  log_Attitude_Farmworkers=as.numeric(scale(log_Attitude_Farmworkers)),
+  log_Attitude_VultDontKill=as.numeric(scale(log_Attitude_VultDontKill)),
+  log_Attitude_DontDisease=as.numeric(scale(log_Attitude_DontDisease)),
+  log_Attitude_WantVultures=as.numeric(scale(log_Attitude_WantVultures)),
+  log_PredLoss_all=as.numeric(scale(log_PredLoss_all)),
+  log_PredLoss_small=as.numeric(scale(log_PredLoss_small)),
+  log_PredLoss_large=as.numeric(scale(log_PredLoss_large)),
+  log_PredLoss_Factory=as.numeric(scale(log_PredLoss_Factory)),
+  log_PercentagePoisoning=as.numeric(scale(log_PercentagePoisoning)),
+  log_Attitude_Game=as.numeric(scale(log_Attitude_Game)),
+  log_Attitude_Predators=as.numeric(scale(log_Attitude_Predators)),
+  log_Attitude_Total=as.numeric(scale(log_Attitude_Total)),
+  log_FreqVult=as.numeric(scale(log_FreqVult))
+           )
+
+```
+
+
+# Multivariate regression analysis
+
+## Global Model for one-year period
+```{r Global 1Y}
+m.data <- m.data %>% drop_na(log_PercentagePoisoning, log_Attitude_Total, log_Attitude_Game, log_Attitude_Predators, log_Attitude_Farmworkers, log_PercInc_Cont, log_All_largestock, log_All_smallstock, log_All_factoryLS, log_PropPred_all, MainC_PredTop2, log_FreqVult, log_Farm_size_ha, log_Age, Edu_lvl)
+#This is to make data set that has same length and contains coordiantes that we can add our predictions of poisoning probability to later on for the IDW map
+
+global.mod <- ictreg(UCT_lastYear ~ log_PercentagePoisoning + log_Attitude_Total + log_Attitude_Game  + log_Attitude_Predators + log_Attitude_Farmworkers  + log_PercInc_Cont + log_All_largestock + log_All_smallstock + log_All_factoryLS + log_PropPred_all + MainC_PredTop2 + log_FreqVult + log_Farm_size_ha + log_Age + Edu_lvl, data = m.data,	treat = "TreatmentControl_Binary", J = 4, method = "nls")
+
+summary(global.mod)
+
+```
+
+```{r P values Global model}
+N <- dim(global.mod$x)[1]
+K <- length(coef(global.mod))
+
+coef.global <- coef(global.mod)
+stde.global <- sqrt(diag(vcov((global.mod))))
+test.global <- coef(global.mod)/sqrt(diag(vcov((global.mod))))
+pval.global <- 2 * pt(abs(test.global), df = N - K, lower.tail = FALSE)
+Spval.global <- pval.global[1:16] # to just get p-values for sensitive item
+Cpval.global <- pval.global[17:32] # to just get p-values for sensitive item
+```
+
+```{r Results table}
+
+CItable <- cbind(global.mod$par.treat, global.mod$se.treat, Spval.global, global.mod$par.control, global.mod$se.control, Cpval.global)
+
+colnames(CItable) <- c("Sensitive_coef", "Sensitive_se", "p_value_sen", "Control_coef", "Control_se", "p_value_con")
+
+print(xtable(CItable, digits = 3), file = "./Outputs/Tables/Reults_GlobalMod_20200818.tex")
+
+```
+
+## Global model for five year period
+
+```{r Global 5y, include=FALSE, include=FALSE, eval=FALSE}
+
+m5.data <- m.data %>% drop_na(UCT_fiveYears)
+
+global.mod5 <- ictreg(UCT_fiveYears ~ log_PercentagePoisoning + log_Attitude_Total + log_Attitude_Game  + log_Attitude_Predators + log_Attitude_Farmworkers  + log_PercInc_Cont + log_All_largestock + log_All_smallstock + log_All_factoryLS + log_PropPred_all + MainC_PredTop2 + log_FreqVult + log_Farm_size_ha + log_Age + Edu_lvl, data = m5.data,	treat = "TreatmentControl_Binary", J = 4, method = "nls")
+summary(global.mod5)
+
+```
+
+```{r P values 5year Global model}
+N <- dim(global.mod5$x)[1]
+K <- length(coef(global.mod5))
+
+coef.global <- coef(global.mod5)
+stde.global <- sqrt(diag(vcov((global.mod5))))
+test.global <- coef(global.mod5)/sqrt(diag(vcov((global.mod5))))
+pval.global <- 2 * pt(abs(test.global), df = N - K, lower.tail = FALSE)
+Spval.global <- pval.global[1:16] # to just get p-values for sensitive item
+Cpval.global <- pval.global[17:32] # to just get p-values for sensitive item
+
+```
+
+```{r Table Global 5Y}
+
+CItable5 <- cbind(global.mod5$par.treat, global.mod5$se.treat, Spval.global, global.mod5$par.control, global.mod5$se.control, Cpval.global)
+
+colnames(CItable5) <- c("Sensitive_coef", "Sensitive_se", "p_value_sen", "Control_coef", "Control_se", "p_value_con")
+
+print(xtable(CItable5, digits = 3), file = "./Outputs/Tables/Results_GlobalMod5y_20200818.tex")
+
+```
+
+# Double checking covariate correlation
+```{r Correlation chart, include=FALSE, echo=FALSE}
+
+m.data %>% dplyr::select(log_PercentagePoisoning, log_Attitude_Total, log_Attitude_Game, log_Attitude_Predators, log_Attitude_Farmworkers, log_PercInc_Cont, log_All_largestock, log_All_smallstock, log_All_factoryLS, log_PropPred_all, log_FreqVult, log_Farm_size_ha, log_Age) %>% 
+  chart.Correlation(., histogram = FALSE, pch=19, cex = 20)
+
+```
+
+# Formally testing ceiling and floor effects
+
+
+If effects are found, directly model ceiling and floor effects at the cost of additional assumption.
+
+If complete separation of covariates occur in logistic regression models when adding ceiling and floor effects - then weakly informative priors can be added (Basically it seems that if you get Prob 0 or 1 when modeling ceiling and floor effects you need to use the ceiling.fit=bayesglm function).
+
+Investigate robustness of any conclusions to the potential existence of ceiling and floor effects. Estimate the population proportion of liars using intercept-only model (if this proportion is large run a multivariate regression model that incorporates ceiling and/or floor effects).
+
+## One year period
+```{r CeilingFloor effects 1Y intercept model}
+
+# LAST YEAR
+#intercept model
+ceiling <- ictreg(UCT_lastYear ~ 1, data = m.data,	treat = "TreatmentControl_Binary",
+                  J = 4, method = "ml", fit.start = "nls", 
+                  ceiling = TRUE, ceiling.fit = "bayesglm", ceiling.formula = ~1)
+#warning message: log-likelihood is not monotonically increasing.
+summary(ceiling, boundary.proportions = T)
+# Quasi-Bayesian approximation estimates
+# Ceiling liar cond. prob. est. = 0.31923 (s.e. = 0.01464)
+# Ceiling liar pop. prop. est. = 0.00125 (s.e. = 7e-05) 
+# 
+# Maximum likelihood estimates
+# Ceiling liar cond. prob. est. = 0.04253 
+# Ceiling liar pop. prop. est. = 0.00013
+
+
+floor <- ictreg(UCT_lastYear ~ 1, treat = "TreatmentControl_Binary", 
+	      	 	J = 4, data = m.data, method = "ml", fit.start = "glm", 
+			floor = TRUE, floor.fit = "bayesglm",
+			floor.formula = ~ 1)
+
+summary(floor, boundary.proportions = T)
+# Quasi-Bayesian approximation estimates
+# Floor liar cond. prob. est. = 0.3318 (s.e. = 0.01515)
+# Floor liar pop. prop. est. = 0.00162 (s.e. = 1e-04) 
+# 
+# Maximum likelihood estimates
+# Floor liar cond. prob. est. = 0.039 
+# Floor liar pop. prop. est. = 0.00019 
+
+
+both.results <- ictreg(UCT_lastYear ~ 1, treat = "TreatmentControl_Binary", 
+	     	       J = 4, data = m.data, method = "ml", 
+		       floor = TRUE, ceiling = TRUE, 
+		       floor.fit = "bayesglm", ceiling.fit = "bayesglm",
+		       floor.formula = ~ 1,
+		       ceiling.formula = ~ 1)
+# get the warning that  log-likelihood is not monotonically increasing
+summary(both.results, boundary.proportions = T)
+# Quasi-Bayesian approximation estimates
+# Ceiling liar cond. prob. est. = 0.25157 (s.e. = 0.01203)
+# Ceiling liar pop. prop. est. = 0.00072 (s.e. = 5e-05) ~ THIS IS USED AS CEILING EFFECT
+# Floor liar cond. prob. est. = 0.34544 (s.e. = 0.01055)
+# Floor liar pop. prop. est. = 0.00132 (s.e. = 6e-05) ~ THIS IS USED AS CEILING EFFECT
+# 
+# Maximum likelihood estimates
+# Ceiling liar cond. prob. est. = 0.06078 
+# Ceiling liar pop. prop. est. = 0.00013 
+# Floor liar cond. prob. est. = 0.25917 
+# Floor liar pop. prop. est. = 0.00088 
+#############################################
+```
+
+```{r CeilingFloor effects 1Y covariates model}
+# Last Year - With covariates
+
+ceiling.cov <- ictreg(UCT_lastYear ~ log_PercentagePoisoning + log_Attitude_Total + log_Attitude_Game  + log_Attitude_Predators + log_Attitude_Farmworkers  + log_PercInc_Cont + log_All_largestock + log_All_smallstock + log_All_factoryLS + log_PredLoss_all + MainC_PredTop2 + log_FreqVult + log_Farm_size_ha + log_Age + Edu_lvl, data = m.data,	treat = "TreatmentControl_Binary",
+                  J = 4, method = "ml", fit.start = "nls", 
+                  ceiling = TRUE, ceiling.fit = "bayesglm", 
+                  ceiling.formula = ~ log_PercentagePoisoning + log_Attitude_Total + log_Attitude_Game  + log_Attitude_Predators + log_Attitude_Farmworkers  + log_PercInc_Cont + log_All_largestock + log_All_smallstock + log_All_factoryLS + log_PredLoss_all + MainC_PredTop2 + log_FreqVult + log_Farm_size_ha + log_Age + Edu_lvl)
+#warning message: log-likelihood is not monotonically increasing, glm probabilties 0 or 1 occurred
+summary(ceiling.cov, boundary.proportions = T)
+# Quasi-Bayesian approximation estimates
+# Ceiling liar cond. prob. est. = 0.45339 (s.e. = 0.00728)
+# Ceiling liar pop. prop. est. = 0.00399 (s.e. = 0.00011)
+# 
+# Maximum likelihood estimates
+# Ceiling liar cond. prob. est. = 0.29159 
+# Ceiling liar pop. prop. est. = 0.00147 
+
+floor.cov  <- ictreg(UCT_lastYear ~ log_PercentagePoisoning + log_Attitude_Total + log_Attitude_Game  + log_Attitude_Predators + log_Attitude_Farmworkers  + log_PercInc_Cont + log_All_largestock + log_All_smallstock + log_All_factoryLS + log_PredLoss_all + MainC_PredTop2 + log_FreqVult + log_Farm_size_ha + log_Age + Edu_lvl, treat = "TreatmentControl_Binary", 
+	      	 	J = 4, data = m.data, method = "ml", fit.start = "glm", 
+			floor = TRUE, floor.fit = "bayesglm",
+			floor.formula = ~ log_PercentagePoisoning + log_Attitude_Total + log_Attitude_Game  + log_Attitude_Predators + log_Attitude_Farmworkers  + log_PercInc_Cont + log_All_largestock + log_All_smallstock + log_All_factoryLS + log_PredLoss_all + MainC_PredTop2 + log_FreqVult + log_Farm_size_ha + log_Age + Edu_lvl)
+#error: missing values where TRUE/False needed, warnings: prob 0/1 occured, log-likelihood monotonically increasing
+summary(floor.cov, boundary.proportions = T)
+
+both.results.cov  <- ictreg(UCT_lastYear ~ log_PercentagePoisoning + log_Attitude_Total + log_Attitude_Game  + log_Attitude_Predators + log_Attitude_Farmworkers  + log_PercInc_Cont + log_All_largestock + log_All_smallstock + log_All_factoryLS + log_PredLoss_all + MainC_PredTop2 + log_FreqVult + log_Farm_size_ha + log_Age + Edu_lvl, treat = "TreatmentControl_Binary", 
+	     	       J = 4, data = m.data, method = "ml", 
+		       floor = TRUE, ceiling = TRUE, 
+		       floor.fit = "bayesglm", ceiling.fit = "bayesglm",
+		       floor.formula = ~ log_PercentagePoisoning + log_Attitude_Total + log_Attitude_Game  + log_Attitude_Predators + log_Attitude_Farmworkers  + log_PercInc_Cont + log_All_largestock + log_All_smallstock + log_All_factoryLS + log_PredLoss_all + MainC_PredTop2 + log_FreqVult + log_Farm_size_ha + log_Age + Edu_lvl,
+		       ceiling.formula = ~ log_PercentagePoisoning + log_Attitude_Total + log_Attitude_Game  + log_Attitude_Predators + log_Attitude_Farmworkers  + log_PercInc_Cont + log_All_largestock + log_All_smallstock + log_All_factoryLS + log_PredLoss_all + MainC_PredTop2 + log_FreqVult + log_Farm_size_ha + log_Age + Edu_lvl)
+# get the warning that  log-likelihood is not monotonically increasing $ porb 0/1 occurred
+summary(both.results.cov, boundary.proportions = T)
+# Quasi-Bayesian approximation estimates
+# Ceiling liar cond. prob. est. = 0.42414 (s.e. = 0.00712)
+# Ceiling liar pop. prop. est. = 0.00342 (s.e. = 9e-05) ~ THIS IS USED AS CEILING EFFECT
+# Floor liar cond. prob. est. = 0.35195 (s.e. = 0.01162)
+# Floor liar pop. prop. est. = 0.00338 (s.e. = 0.00018) ~ THIS IS USED AS CEILING EFFECT
+# 
+# Maximum likelihood estimates
+# Ceiling liar cond. prob. est. = 0.25405 
+# Ceiling liar pop. prop. est. = 0.0012 
+# Floor liar cond. prob. est. = 0.04248 
+# Floor liar pop. prop. est. = 0.00015 
+
+```
+
+## Five year period
+```{r CeilingFloor effects 5Y intercept model}
+#FIVE YEARS
+#intercept model
+
+ceiling5 <- ictreg(UCT_fiveYears ~ 1, data = m.data,	treat = "TreatmentControl_Binary", J = 4, method = "ml", fit.start = "nls", ceiling = TRUE, ceiling.fit = "bayesglm", ceiling.formula = ~1)
+#error- missing value where TRUE/FALSE needed, warning: prob 0/1 occurred
+summary(ceiling5, boundary.proportions = T)
+
+floor5 <- ictreg(UCT_fiveYears ~ 1, treat = "TreatmentControl_Binary", 
+	      	 	J = 4, data = m.data, method = "ml", fit.start = "glm", 
+			floor = TRUE, floor.fit = "bayesglm",
+			floor.formula = ~ 1)
+#warning: log-likelihood is not monotonically increasing
+summary(floor5, boundary.proportions = T)
+# Quasi-Bayesian approximation estimates
+# Floor liar cond. prob. est. = 0.3318 (s.e. = 0.01515)
+# Floor liar pop. prop. est. = 0.00162 (s.e. = 1e-04)
+# 
+# Maximum likelihood estimates
+# Floor liar cond. prob. est. = 0.039 
+# Floor liar pop. prop. est. = 0.00019 
+
+
+both.results5 <- ictreg(UCT_fiveYears ~ 1, treat = "TreatmentControl_Binary", 
+	     	       J = 4, data = m.data, method = "ml", 
+		       floor = TRUE, ceiling = TRUE, 
+		       floor.fit = "bayesglm", ceiling.fit = "bayesglm",
+		       floor.formula = ~ 1,
+		       ceiling.formula = ~ 1)
+# get the warning that  log-likelihood is not monotonically increasing
+summary(both.results5, boundary.proportions = T)
+# Quasi-Bayesian approximation estimates
+# Ceiling liar cond. prob. est. = 0.25157 (s.e. = 0.01203)
+# Ceiling liar pop. prop. est. = 0.00072 (s.e. = 5e-05) ~ THIS IS USED AS CEILING EFFECT
+# Floor liar cond. prob. est. = 0.34544 (s.e. = 0.01055)
+# Floor liar pop. prop. est. = 0.00132 (s.e. = 6e-05) ~ THIS IS USED AS CEILING EFFECT
+# 
+# Maximum likelihood estimates
+# Ceiling liar cond. prob. est. = 0.06078 
+# Ceiling liar pop. prop. est. = 0.00013 
+# Floor liar cond. prob. est. = 0.25917 
+# Floor liar pop. prop. est. = 0.00088 
+
+```
+
+```{r CeilingFloor effects 5Y covariates model}
+#FIVE YEARS
+#covariates model
+
+ceiling5c <- ictreg(UCT_fiveYears ~ log_PercentagePoisoning + log_Attitude_Total + log_Attitude_Game  + log_Attitude_Predators + log_Attitude_Farmworkers  + log_PercInc_Cont + log_All_largestock + log_All_smallstock + log_All_factoryLS + log_PredLoss_all + MainC_PredTop2 + log_FreqVult + log_Farm_size_ha + log_Age + Edu_lvl, data = m.data,	treat = "TreatmentControl_Binary", 
+                  J = 4, method = "ml", fit.start = "nls", ceiling = TRUE, ceiling.fit = "bayesglm", 
+                  ceiling.formula = ~log_PercentagePoisoning + log_Attitude_Total + log_Attitude_Game  + log_Attitude_Predators + log_Attitude_Farmworkers  + log_PercInc_Cont + log_All_largestock + log_All_smallstock + log_All_factoryLS + log_PredLoss_all + MainC_PredTop2 + log_FreqVult + log_Farm_size_ha + log_Age + Edu_lvl)
+#error- missing value where TRUE/FALSE needed, warning: prob 0/1 occurred
+summary(ceiling5c, boundary.proportions = T)
+
+
+floor5c <- ictreg(UCT_fiveYears ~ log_Farm_size_ha + log_Attitude_Game + log_All_smallstock + log_Attitude_Predators + log_PropPred_all + log_PercentagePoisoning + log_Age + log_PercInc_Cont + log_FreqVult, treat = "TreatmentControl_Binary", 
+	      	 	J = 4, data = m5.data, method = "ml", fit.start = "glm", 
+			floor = TRUE, floor.fit = "bayesglm",
+			floor.formula = ~ log_Farm_size_ha + log_Attitude_Game + log_All_smallstock + log_Attitude_Predators + log_PropPred_all + log_PercentagePoisoning + log_Age + log_PercInc_Cont + log_FreqVult)
+#error- missing value where TRUE/FALSE needed, warning: prob 0/1 occurred
+summary(floor5c, boundary.proportions = T)
+
+both.results5c <- ictreg(UCT_fiveYears ~ log_Farm_size_ha + log_Attitude_Game + log_All_smallstock + log_Attitude_Predators + log_PropPred_all + log_PercentagePoisoning + log_Age + log_PercInc_Cont + log_FreqVult, treat = "TreatmentControl_Binary", 
+	     	       J = 4, data = m5.data, method = "ml", 
+		       floor = TRUE, ceiling = TRUE, 
+		       floor.fit = "bayesglm", ceiling.fit = "bayesglm",
+		       floor.formula = ~ log_Farm_size_ha + log_Attitude_Game + log_All_smallstock + log_Attitude_Predators + log_PropPred_all + log_PercentagePoisoning + log_Age + log_PercInc_Cont + log_FreqVult,
+		       ceiling.formula = ~ log_Farm_size_ha + log_Attitude_Game + log_All_smallstock + log_Attitude_Predators + log_PropPred_all + log_PercentagePoisoning + log_Age + log_PercInc_Cont + log_FreqVult)
+#error- missing value where TRUE/FALSE needed, warning: prob 0/1 occurred
+summary(both.results5c, boundary.proportions = T)
+
+```
+
+
+# Estimated Prevalence of poisoning across different model types
+
+Blair et al 2019:
+Ahlquist (2018) recommended that sensitive behavior prevalence should be compared between DiM/NLS and MLreg  to assess model performance (hense I follow the methods of Blair and Imai 2019 and replicate their figure3 and perform a Hausman test).
+
+
+```{r Poisoning prevalence figure, include=FALSE, eval=FALSE}
+
+# FIGURE 3 estimated proportions poisoning
+
+# models:
+# DiM (difference in means prevalence estimate)
+poison.fit <-
+  ictreg(UCT_lastYear ~ 1,
+         treat = "TreatmentControl_Binary",
+         method = "lm",
+         J = 4,
+         data = m.data)
+p.lastYear.dim <- data.frame(
+  outcome = "poison", method = "dim", 
+  predict(poison.fit, se.fit = T, avg = T, interval = "confidence", level = 0.95)$fit)
+
+poison.fit5 <-
+  ictreg(UCT_fiveYears ~ 1,
+         treat = "TreatmentControl_Binary",
+         method = "lm",
+         J = 4,
+         data = m5.data)
+p.5year.dim <- data.frame(
+  outcome = "poison", method = "dim", 
+  predict(poison.fit5, se.fit = T, avg = T, interval = "confidence", level = 0.95)$fit)
+
+# MLE(maximum likelihood estimate)
+
+lastYear.mle.nocov <-
+  ictreg(UCT_lastYear ~ 1,
+         treat = "TreatmentControl_Binary",
+         J = 4,
+         data = m.data)
+p.lastYear.mle.nocov <- data.frame(
+  outcome = "poison", method = "mle-nocov", 
+  predict(lastYear.mle.nocov, se.fit = T, avg = T, interval = "confidence", level = 0.95)$fit)
+
+FYear.mle.nocov <-
+  ictreg(UCT_fiveYears ~ 1,
+         treat = "TreatmentControl_Binary",
+         data = m5.data)
+p.5Year.mle.nocov <- data.frame(
+  outcome = "poison", method = "mle-nocov", 
+  predict(FYear.mle.nocov, se.fit = T, avg = T, interval = "confidence", level = 0.95)$fit)
+
+# NLS (non-linear least sqaures estimate)
+lastYear.nls.cov <-
+  ictreg(UCT_lastYear ~ log_Farm_size_ha + log_Attitude_Game + log_All_smallstock + log_Attitude_Predators + log_PropPred_all + log_PercentagePoisoning + log_Age + log_PercInc_Cont,
+         data = m.data,	treat = "TreatmentControl_Binary", J = 4, method = "onestep")
+p.lastYear.nls.cov <- data.frame(
+  outcome = "poison", method = "nls-cov", 
+  predict(lastYear.nls.cov, se.fit = T, avg = T, interval = "confidence", level = 0.95)$fit)
+
+lastYear.nls.nocov <-
+  ictreg(UCT_lastYear ~ 1,
+             treat = "TreatmentControl_Binary",
+             J = 4,
+             data = m.data, 
+             method = "nls")
+p.lastYear.nls.nocov  <- data.frame(
+  outcome = "poison", method = "nls-nocov",
+  predict(lastYear.nls.nocov, se.fit = T, avg = T, interval = "confidence", level = 0.95)$fit)
+
+
+FYear.nls.cov <-
+  ictreg(UCT_fiveYears ~ log_Farm_size_ha + log_Attitude_Game + log_All_smallstock + log_Attitude_Predators + log_PropPred_all + log_PercentagePoisoning + log_Age + log_PercInc_Cont + log_FreqVult,
+         data = m5.data,	treat = "TreatmentControl_Binary", J = 4, method = "onestep")
+p.5Year.nls.cov <- data.frame(
+  outcome = "poison", method = "nls-cov", 
+  predict(FYear.nls.cov, se.fit = T, avg = T, interval = "confidence", level = 0.95)$fit)
+
+FYear.nls.nocov <-
+  ictreg(UCT_fiveYears ~ 1,
+         treat = "TreatmentControl_Binary",
+         J = 4,
+         data = m5.data,
+             method = "nls")
+p.5Year.nls.nocov <- data.frame(
+  outcome = "poison", method = "nls-nocov", 
+  predict(FYear.nls.nocov, se.fit = T, avg = T, interval = "confidence", level = 0.95)$fit)
+
+##################################
+
+#figure
+pdf("prevalence_estimates.pdf", width = 10, height = 5)
+  par(mfrow = c(1, 1), cex = 0.8, mar = c(4, 1, 2, 0) + 0.1, oma = c(0, 9, 0, 0), pty = "sq", bty = "n")
+  plot(
+    x = 1:4, 
+    y = 1:4, 
+    type = "n", 
+    xlab = "", 
+    ylab = "", 
+    xlim = c(-0.1, 0.6), 
+    ylim = c(0.5, 4), 
+    xaxt = "n",
+    yaxt = "n"
+  )
+  axis(side = 1, at = seq(-0.1 , 0.6, by = 0.1), las = 1)
+  abline(v = 0, col = "red")
+  arrows(y0 = 4, x0 = p.lastYear.dim$lwr, x1 = p.lastYear.dim$upr, 
+    code = 3, angle = 90, length = 0.05)
+  arrows(y0 = 3.8, x0 = p.5year.dim$lwr, x1 = p.5year.dim$upr, 
+    code = 3, angle = 90, length = 0.05, col = "blue")
+  arrows(y0 = 3, x0 = p.lastYear.nls.cov$lwr, x1 = p.lastYear.nls.cov$upr, 
+    code = 3, angle = 90, length = 0.05)
+  arrows(y0 = 2.8, x0 = p.5Year.nls.cov$lwr, x1 = p.5Year.nls.cov$upr, 
+    code = 3, angle = 90, length = 0.05, col = "blue")
+  arrows(y0 = 2, x0 = p.lastYear.nls.nocov$lwr, x1 = p.lastYear.nls.nocov$upr, 
+    code = 3, angle = 90, length = 0.05)
+  arrows(y0 = 1.8, x0 = p.5Year.nls.nocov$lwr, x1 = p.5Year.nls.nocov$upr, 
+    code = 3, angle = 90, length = 0.05, col = "blue")
+  arrows(y0 = 1, x0 = p.lastYear.mle.nocov$lwr, x1 = p.lastYear.mle.nocov$upr, 
+    code = 3, angle = 90, length = 0.05)
+  arrows(y0 = 0.8, x0 = p.5Year.mle.nocov$lwr, x1 = p.5Year.mle.nocov$upr, 
+    code = 3, angle = 90, length = 0.05, col = "blue")
+  
+  
+  points(y = 4:1, 
+    x = 
+      c(p.lastYear.dim$fit, 
+        p.lastYear.nls.cov$fit, 
+        p.lastYear.nls.nocov$fit,
+        p.lastYear.mle.nocov$fit
+        ), 
+    pch = 21, 
+    bg = "black")
+  
+    points(y = 3.8:0.8, 
+    x = 
+      c(p.5year.dim$fit,
+        p.5Year.nls.cov$fit, 
+        p.5Year.nls.nocov$fit,
+        p.5Year.mle.nocov$fit), 
+    pch = 21, 
+    bg = "blue")
+
+  axis(side = 2, at = 3.9:0.9, 
+    labels = c("Diffence in Means",
+      "Nonlinear Least Squares (covariates)",
+      "Nonlinear Least Squares",
+      "Maximum Likelihood"), 
+    las = 2)
+  
+  mtext(side = 1, text = "Estimated Prevalence", line = 2.5, font = 1, cex = 1.05)
+  
+  legend(0.25, 1.45, legend=c("Last year", "Five years"),
+       col=c("black", "blue"), lty=1, cex=1.2, bty = "n")
+
+dev.off()
+
+#ggsave(here("Outputs", "Plots", "Final", "ModelComparisons_20201027.tiff"), units = "cm", width = 10, height = 10, dpi = 600)
+
+```
+
+
+
+# Model coefficient table
+
+```{r}
+
+# FIRST YEAR
+# COEFFICIENT TABLE (Table 5)
+N <- dim(lastYear.nls.cov$x)[1]
+K <- length(coef(lastYear.nls.cov))
+
+coef.sms.nls <- coef(lastYear.nls.cov)
+stde.sms.nls <- sqrt(diag(vcov((lastYear.nls.cov))))
+test.sms.nls <- coef(lastYear.nls.cov)/sqrt(diag(vcov((lastYear.nls.cov))))
+pval.sms.nls <- 2 * pt(abs(test.sms.nls), df = N - K, lower.tail = FALSE)
+
+coef.sms.mle <- coef(lastYear.mle.cov)
+stde.sms.mle <- sqrt(diag(vcov((lastYear.mle.cov))))
+test.sms.mle <- coef(lastYear.mle.cov)/sqrt(diag(vcov((lastYear.mle.cov))))
+pval.sms.mle <- 2 * pt(abs(test.sms.mle), df = N - K, lower.tail = FALSE)
+
+coef.sms.mle.robust <- coef(lastYear.mle.cov.R)
+stde.sms.mle.robust <- sqrt(diag(vcov((lastYear.mle.cov.R))))
+test.sms.mle.robust <- coef(lastYear.mle.cov.R)/sqrt(diag(vcov((lastYear.mle.cov.R))))
+pval.sms.mle.robust <- 2 * pt(abs(test.sms.mle.robust), df = N - K, lower.tail = FALSE)
+
+print(xtable(cbind(
+  coef.sms.nls, stde.sms.nls, 
+  coef.sms.mle, stde.sms.mle, 
+  coef.sms.mle.robust, stde.sms.mle.robust), 
+  digits = 3), 
+  file = "./Outputs/Tables/Tables_fromBlairetal2019_reproduced/table_coef_1y.tex")
+
+# FIVE YEAR
+# COEFFICIENT TABLE (Table 5)
+N5 <- dim(FYear.nls.cov$x)[1]
+K5 <- length(coef(FYear.nls.cov))
+
+coef.sms.nls5 <- coef(FYear.nls.cov)
+stde.sms.nls5 <- sqrt(diag(vcov((FYear.nls.cov))))
+test.sms.nls5 <- coef(FYear.nls.cov)/sqrt(diag(vcov((FYear.nls.cov))))
+pval.sms.nls5 <- 2 * pt(abs(test.sms.nls5), df = N5 - K5, lower.tail = FALSE)
+
+coef.sms.mle5 <- coef(Fyear.mle.cov)
+stde.sms.mle5 <- sqrt(diag(vcov((Fyear.mle.cov))))
+test.sms.mle5 <- coef(Fyear.mle.cov)/sqrt(diag(vcov((Fyear.mle.cov))))
+pval.sms.mle5 <- 2 * pt(abs(test.sms.mle5), df = N5 - K5, lower.tail = FALSE)
+
+coef.sms.mle.robust5 <- coef(Fyear.mle.cov.R)
+stde.sms.mle.robust5 <- sqrt(diag(vcov((Fyear.mle.cov.R))))
+test.sms.mle.robust5 <- coef(Fyear.mle.cov.R)/sqrt(diag(vcov((Fyear.mle.cov.R))))
+pval.sms.mle.robust5 <- 2 * pt(abs(test.sms.mle.robust5), df = N5 - K5, lower.tail = FALSE)
+
+print(xtable(cbind(
+  coef.sms.nls5, stde.sms.nls5, 
+  coef.sms.mle5, stde.sms.mle5, 
+  coef.sms.mle.robust5, stde.sms.mle.robust5), 
+  digits = 3), 
+  file = "./Outputs/Tables/Tables_fromBlairetal2019_reproduced/table_coef_5y.tex")
+  
+```
+
+
+## Testing for measurement error-Hausman test
+
+NLS and DiM are more robust than MLreg against measurement error. Comparison between NLS(which is itself a generalized version of the DiM) and MLreg models will help us to determine whether additional assumptions required by MLreg are justified.
+
+```{r Hausman tests}
+
+#################
+# HAUSMAN TESTS #
+#################
+# The idea is that if the regression modeling assumptions are correct, then NLSreg and MLreg should yield statistically indistinguishable results. If their differences are significant,we reject the null hypothesis of correct specification.
+
+# Replicates Table 4
+hausman.tab <- rbind(
+  # texting while driving
+  ict.hausman.test(lastYear.mle.nocov, lastYear.nls.nocov, abs = TRUE), 
+  ict.hausman.test(lastYear.mle.cov, lastYear.nls.cov, abs = TRUE),
+  ict.hausman.test(FYear.mle.nocov, FYear.nls.nocov, abs = TRUE), 
+  ict.hausman.test(Fyear.mle.cov, FYear.nls.cov, abs = TRUE))
+
+#indicates we have misspecification
+
+print(xtable(hausman.tab[, c("df", "stat", "p")], type = "latex", digits = 3),
+  file = here( "Outputs", "Tables", "Tables_fromBlairetal2019_reproduced","table4.tex"))
+
+```
+
+```{r Repondent type proportions, include=FALSE, eval=FALSE}
+
+#########################
+# TABLES OF PROPORTIONS #
+#########################
+# replicates table 3
+
+print(xtable(
+    rbind(
+    cbind(ict.test(y = m.data$UCT_lastYear, treat = m.data$TreatmentControl_Binary, J = 4)$pi.table, 
+       ict.test(y = m5.data$UCT_fiveYears, treat = m.data$TreatmentControl_Binary, J = 4)$pi.table), 
+    c(
+      poison.fit$par.treat, poison.fit$se.treat, 
+      poison.fit5$par.treat, poison.fit5$se.treat
+      )
+    ), 
+       digits = 3), 
+file = "./Outputs/Tables/table3.tex")
+
+end <- Sys.time()
+
+end - start
+
+# PROBLEM: negative estimates of respondent type proportions suggest that at least one of the identification assumptions have been violated (we have negative values)
+```
+
+
+# Effect plots
+```{r}
+
+library(effects) # use effects package to plot
+library(lme4)
+library(MuMIn)
+library(GGally)
+library(AUC)
+library(gtools)
+library(performance)
+library(reshape2)
+library(see)
+library(ggpubr)
+
+# Gabi's function for setting sequence of values to be predicted
+get.domain.seq <- function(domain.data, steps){
+  return(seq(min(domain.data),
+             max(domain.data), length.out=steps))
+}
+
+# select covariates to fix
+med.PPoisoning <- median(m.data$log_PercentagePoisoning, na.rm = T)
+med.ATot <- median(m.data$log_Attitude_Total, na.rm = T)
+med.AGame <- median(m.data$log_Attitude_Game, na.rm = T)
+med.APred <- median(m.data$log_Attitude_Predators, na.rm = T)
+med.Afarw <-  median(m.data$log_Attitude_Farmworkers, na.rm = T)
+med.PInc <- median(m.data$log_PercInc_Cont, na.rm = T)
+med.LargeS <- median(m.data$log_All_largestock, na.rm = T)
+med.SmallS <- median(m.data$log_All_smallstock, na.rm = T)
+med.FactoryS <- median(m.data$log_All_factoryLS, na.rm = T)
+med.PPred <- median(m.data$log_PropPred_all, na.rm = T)
+med.VFreq <-  median(m.data$log_FreqVult, na.rm = T)
+med.FarmS <- median(m.data$log_Farm_size_ha, na.rm = T)
+med.Age <- median(m.data$log_Age, na.rm = T)
+
+```
+
+```{r Theme}
+
+t <- theme(axis.title.x = element_text(margin = unit(c(4, 0, 0, 0), "mm"), size = 20),
+        axis.title.y = element_text(margin = unit(c(0, 5, 0, 0), "mm"), size = 20),
+        axis.text.x = element_text(size = 18, color = "black"),
+        axis.text.y = element_text(size = 18, color = "black"),
+        axis.line = element_line(size = 0.6, colour = "black"),
+        legend.text = element_text(size = 24),
+        panel.background = element_rect(fill = "white", colour = "white"),
+        legend.title = element_blank(),
+        legend.position = c(0.2, 0.8),
+        legend.key = element_blank())
+
+```
+
+## Percentage poiosoning effect plot
+
+```{r Plotting covariate effects PERCENTAGE POISONING}
+# Create prediction dataframe
+
+pois.data <- m.data %>% filter(., log_PercentagePoisoning != "NA", Edu_lvl != "NA")
+
+values.pp <- expand.grid(
+log_PercentagePoisoning = c(get.domain.seq(pois.data$log_PercentagePoisoning, 800), med.PPoisoning),
+log_Attitude_Total = med.ATot,
+log_Attitude_Game = med.AGame,
+log_Attitude_Predators = med.APred,
+log_Attitude_Farmworkers = med.Afarw,
+log_PercInc_Cont = med.PInc,
+log_All_largestock = med.LargeS,
+log_All_smallstock = med.SmallS, 
+log_All_factoryLS = med.FactoryS,
+log_PropPred_all = med.PPred,
+MainC_PredTop2 = unique(pois.data$MainC_PredTop2, na.rm = T),
+log_FreqVult = med.VFreq,
+log_Farm_size_ha = med.FarmS,
+log_Age = med.Age,
+Edu_lvl = unique(pois.data$Edu_lvl, na.rm = T),
+Predictions = 0,
+Predictions5y = 0
+)
+
+# create the interval and backtransform
+pp.prediction.se  <- predict(global.mod, values.pp, type = "response", re.form=NA, allow.new.levels=TRUE, se.fit=TRUE, interval = "confidence", level =0.95)
+
+pp.prediction.df <- with(pp.prediction.se, data.frame(log_PercentagePoisoning = values.pp$log_PercentagePoisoning,
+        rsf.hat = pp.prediction.se$fit$fit,
+        CI.low = pp.prediction.se$fit$lwr,
+        CI.high = pp.prediction.se$fit$upr))
+
+######################
+pp5.prediction.se  <- predict(global.mod5, values.pp, type = "response", re.form=NA, allow.new.levels=TRUE, se.fit=TRUE, interval = "confidence", level =0.95)
+
+pp5.prediction.df <- with(pp5.prediction.se, data.frame(log_PercentagePoisoning = values.pp$log_PercentagePoisoning,
+    rsf.hat5 = pp5.prediction.se$fit$fit,
+    CI.low5 = pp5.prediction.se$fit$lwr,
+    CI.high5 = pp5.prediction.se$fit$upr))
+                                                 
+#add predicted values to values dataframe
+
+values.pp$Predictions <- pp.prediction.df$rsf.hat
+values.pp$CI.low = pp.prediction.df$CI.low
+values.pp$CI.high = pp.prediction.df$CI.high
+
+values.pp$Predictions5y <- pp5.prediction.df$rsf.hat5
+values.pp$CI.low5 = pp5.prediction.df$CI.low5
+values.pp$CI.high5 = pp5.prediction.df$CI.high5
+
+values.pp <- values.pp %>% filter(MainC_PredTop2 == "Pred", Edu_lvl == "High") 
+
+values.pp <- gather(values.pp, period, pred.prob, Predictions, Predictions5y)
+
+#plot
+
+PercPois_effectPlot <- ggplot(values.pp, aes(x = log_PercentagePoisoning, y = pred.prob)) +
+  geom_line(aes(linetype = period, color = period), size = 1.3) +
+  xlab("Perception of poisoning prevalence\n") + 
+  ylab("Probability of poisoning") +
+  scale_color_manual(breaks = c("Predictions", "Predictions5y"),
+                     labels = c("One year", "Five years"),
+                    values = c("black", "darkgrey")) +
+  scale_linetype_manual(values=c("solid", "longdash"), labels = c("One year", "Five years")) +
+  guides(color = guide_legend(
+    keywidth=3.4,
+    keyheight = 2,
+    unit = "cm"
+  )) + 
+  t + 
+  coord_cartesian(ylim = c(0, 1)) 
+
+PercPois_effectPlot
+
+ggsave(here("Outputs", "Plots", "Final", "EP_poisoningprev_20201027.tiff"), units = "cm", width = 17, height = 15, dpi = 600)
+
+
+```
+
+## Large stock plot
+
+```{r Plotting covariate effects LARGE STOCK}
+# Create prediction dataframe
+
+largeS.data <- m.data %>% filter(., log_All_largestock != "NA", Edu_lvl != "NA")
+
+values.ls <- expand.grid(
+log_PercentagePoisoning = med.PPoisoning,
+log_Attitude_Total = med.ATot,
+log_Attitude_Game = med.AGame,
+log_Attitude_Predators = med.APred,
+log_Attitude_Farmworkers = med.Afarw,
+log_PercInc_Cont = med.PInc,
+log_All_largestock = c(get.domain.seq(largeS.data$log_All_largestock, 800), med.LargeS),
+log_All_smallstock = med.SmallS, 
+log_All_factoryLS = med.FactoryS,
+log_PropPred_all = med.PPred,
+MainC_PredTop2 = unique(pois.data$MainC_PredTop2, na.rm = T),
+log_FreqVult = med.VFreq,
+log_Farm_size_ha = med.FarmS,
+log_Age = med.Age,
+Edu_lvl = unique(largeS.data$Edu_lvl, na.rm = T),
+Predictions = 0,
+Predictions5y = 0
+)
+
+# create the interval and backtransform
+ls.prediction.se  <- predict(global.mod, values.ls, re.form=NA, allow.new.levels=TRUE, se.fit=TRUE, interval = "confidence", level =0.95)
+
+ls.prediction.df <- with(ls.prediction.se, data.frame(log_All_largestock = values.ls$log_All_largestock,
+                                                        rsf.hat = ls.prediction.se$fit$fit, 
+                                                        CI.low = ls.prediction.se$fit$lwr,
+                                                        CI.high = ls.prediction.se$fit$upr))
+
+#####
+ls5.prediction.se  <- predict(global.mod5, values.ls, re.form=NA, allow.new.levels=TRUE, se.fit=TRUE, interval = "confidence", level =0.95)
+
+ls5.prediction.df <- with(ls5.prediction.se, data.frame(log_All_largestock = values.ls$log_All_largestock,
+                                                        rsf.hat5 = ls5.prediction.se$fit$fit, 
+                                                        CI.low5 = ls5.prediction.se$fit$lwr,
+                                                        CI.high5 = ls5.prediction.se$fit$upr))
+
+#add predicted values to values dataframe
+values.ls$Predictions <- ls.prediction.df$rsf.hat
+values.ls$CI.low = ls.prediction.df$CI.low
+values.ls$CI.high = ls.prediction.df$CI.high
+
+values.ls$Predictions5y <- ls5.prediction.df$rsf.hat5
+values.ls$CI.low5 = ls5.prediction.df$CI.low5
+values.ls$CI.high5 = ls5.prediction.df$CI.high5
+
+values.ls <- values.ls %>% filter(MainC_PredTop2 == "Pred", Edu_lvl == "High") # Subset data so it is only for single levels of your catagoricals
+
+values.ls <- gather(values.ls, period, pred.prob, Predictions, Predictions5y)
+
+#plot
+
+largeS_effectPlot <- ggplot(values.ls, aes(x = log_All_largestock, y = pred.prob)) +
+  geom_line(aes(linetype = period, color = period), size = 1.3) +
+  xlab("Number of large stock\n") + 
+  ylab("Probability of poisoning") +
+  scale_color_manual(breaks = c("Predictions", "Predictions5y"),
+                     labels = c("One year", "Five years"),
+                    values = c("black", "darkgrey")) +
+  scale_linetype_manual(values=c("solid", "longdash"), labels = c("One year", "Five years")) +
+  guides(color = guide_legend(
+    keywidth=3.4,
+    keyheight = 2,
+    unit = "cm"
+  )) + 
+  t + 
+  coord_cartesian(ylim = c(0, 1)) 
+
+largeS_effectPlot 
+
+ggsave(here("Outputs", "Plots", "Final", "EP_largelivestock_20201027.tiff"), units = "cm", width = 17, height = 15, dpi = 600)
+
+```
+
+## Small stock plot
+
+```{r Plotting covariate effects SMALLSTOCK - Gabi's method}
+
+# Create prediction dataframe
+
+ss.data <- m.data %>% filter(., log_All_smallstock != "NA", Edu_lvl != "NA")
+
+values.ss <- expand.grid(
+log_PercentagePoisoning = med.PPoisoning,
+log_Attitude_Total = med.ATot,
+log_Attitude_Game = med.AGame,
+log_Attitude_Predators = med.APred,
+log_Attitude_Farmworkers = med.Afarw,
+log_PercInc_Cont = med.PInc,
+log_All_largestock = med.LargeS,
+log_All_smallstock =c(get.domain.seq(ss.data$log_All_smallstock, 800), med.SmallS), 
+log_All_factoryLS = med.FactoryS,
+log_PropPred_all = med.PPred,
+MainC_PredTop2 = unique(ss.data$MainC_PredTop2, na.rm = T),
+log_FreqVult = med.VFreq,
+log_Farm_size_ha = med.FarmS,
+log_Age = med.Age,
+Edu_lvl = unique(ss.data$Edu_lvl, na.rm = T),
+Predictions = 0,
+Predictions5y = 0
+)
+
+# create the interval and back transform
+ss.prediction.se  <- predict(global.mod, values.ss, re.form=NA, allow.new.levels=TRUE, se.fit=TRUE, interval = "confidence", level =0.95)
+
+ss.prediction.df <- with(ss.prediction.se, data.frame(log_All_smallstock = values.ss$log_All_smallstock,
+                                                        rsf.hat = ss.prediction.se$fit$fit, 
+                                                        CI.low = ss.prediction.se$fit$lwr,
+                                                        CI.high = ss.prediction.se$fit$upr))
+
+
+ss5.prediction.se  <- predict(global.mod5, values.ss, re.form=NA, allow.new.levels=TRUE, se.fit=TRUE, interval = "confidence", level =0.95)
+
+ss5.prediction.df <- with(ss5.prediction.se, data.frame(log_All_smallstock = values.ss$log_All_smallstock,
+                                                        rsf.hat5 = ss5.prediction.se$fit$fit, 
+                                                        CI.low5 = ss5.prediction.se$fit$lwr,
+                                                        CI.high5 = ss5.prediction.se$fit$upr))
+
+#add predicted values to values dataframe
+values.ss$Predictions <- ss.prediction.df$rsf.hat
+values.ss$CI.low = ss.prediction.df$CI.low
+values.ss$CI.high = ss.prediction.df$CI.high
+
+values.ss$Predictions5y <- ss5.prediction.df$rsf.hat5
+values.ss$CI.low5 = ss5.prediction.df$CI.low5
+values.ss$CI.high5 = ss5.prediction.df$CI.high5
+
+values.ss <- values.ss %>% filter(MainC_PredTop2 == "Pred", Edu_lvl == "High") # Subset data so it is only for single levels of your catagoricals
+values.ss <- gather(values.ss, period, pred.prob, Predictions, Predictions5y)
+
+#plot
+SmallS_effectPlot <- ggplot(values.ss, aes(x = log_All_smallstock, y = pred.prob)) +
+  geom_line(aes(linetype = period, color = period), size = 1.3) +
+  xlab("Number of small stock\n") + 
+  ylab("Probability of poisoning") +
+  scale_color_manual(breaks = c("Predictions", "Predictions5y"),
+                     labels = c("One year", "Five years"),
+                    values = c("black", "darkgrey")) +
+  scale_linetype_manual(values=c("solid", "longdash"), labels = c("One year", "Five years")) +
+  guides(color = guide_legend(
+    keywidth=3.4,
+    keyheight = 2,
+    unit = "cm"
+  )) + 
+  t + 
+  coord_cartesian(ylim = c(0, 1)) 
+
+SmallS_effectPlot
+
+ggsave(here("Outputs", "Plots", "Final", "EP_smalllivestock_20201027.tiff"), units = "cm", width = 17, height = 15, dpi = 600)
+
+```
+
+## Proportion predated plot
+
+```{r Plotting covariate effects PROPORTION PREDATED}
+# Create prediction dataframe
+
+propp.data <- m.data %>% filter(., log_PropPred_all != "NA", Edu_lvl != "NA")
+
+values.ppred <- expand.grid(
+log_PercentagePoisoning = med.PPoisoning,
+log_Attitude_Total = med.ATot,
+log_Attitude_Game = med.AGame,
+log_Attitude_Predators = med.APred,
+log_Attitude_Farmworkers = med.Afarw,
+log_PercInc_Cont = med.PInc,
+log_All_largestock = med.LargeS,
+log_All_smallstock = med.SmallS, 
+log_All_factoryLS = med.FactoryS,
+log_PropPred_all = c(get.domain.seq(propp.data$log_PropPred_all, 800), med.PPred),
+MainC_PredTop2 = unique(propp.data$MainC_PredTop2, na.rm = T),
+log_FreqVult = med.VFreq,
+log_Farm_size_ha = med.FarmS,
+log_Age = med.Age,
+Edu_lvl = unique(propp.data$Edu_lvl, na.rm = T),
+Predictions = 0,
+Predictions5y = 0
+)
+
+
+# create the interval and backtransform
+ppred.prediction.se  <- predict(global.mod, values.ppred, re.form=NA, allow.new.levels=TRUE, se.fit=TRUE, interval = "confidence", level =0.95)
+
+ppred.prediction.df <- with(ppred.prediction.se, data.frame(log_PropPred_all = values.ppred$log_PropPred_all,
+                                                        rsf.hat = ppred.prediction.se$fit$fit, 
+                                                        CI.low = ppred.prediction.se$fit$lwr,
+                                                        CI.high = ppred.prediction.se$fit$upr))
+
+ppred5.prediction.se  <- predict(global.mod5, values.ppred, re.form=NA, allow.new.levels=TRUE, se.fit=TRUE, interval = "confidence", level =0.95)
+
+ppred5.prediction.df <- with(ppred5.prediction.se, data.frame(log_PropPred_all = values.ppred$log_PropPred_all,
+                                                        rsf.hat5 = ppred5.prediction.se$fit$fit, 
+                                                        CI.low5 = ppred5.prediction.se$fit$lwr,
+                                                        CI.high5 = ppred5.prediction.se$fit$upr)) 
+
+#add predicted values to values dataframe
+values.ppred$Predictions <- ppred.prediction.df$rsf.hat
+values.ppred$CI.low = ppred.prediction.df$CI.low
+values.ppred$CI.high = ppred.prediction.df$CI.high
+
+values.ppred$Predictions5y <- ppred5.prediction.df$rsf.hat5
+values.ppred$CI.low5 = ppred5.prediction.df$CI.low5
+values.ppred$CI.high5 = ppred5.prediction.df$CI.high5
+
+values.ppred <- values.ppred %>% filter(MainC_PredTop2 == "Pred", Edu_lvl == "High") # Subset data so it is only for single levels of your catagoricals
+
+values.ppred <- gather(values.ppred, period, pred.prob, Predictions, Predictions5y)
+
+#plot
+PropP_effectPlot <- ggplot(values.ppred, aes(x = log_PropPred_all, y = pred.prob)) +
+  geom_line(aes(linetype = period, color = period), size = 1.3) +
+  xlab("Proportion of livestock predated\n") + 
+  ylab("Probability of poisoning") +
+  scale_color_manual(breaks = c("Predictions", "Predictions5y"),
+                     labels = c("One year", "Five years"),
+                    values = c("black", "darkgrey")) +
+  scale_linetype_manual(values=c("solid", "longdash"), labels = c("One year", "Five years")) +
+  guides(color = guide_legend(
+    keywidth=3.4,
+    keyheight = 2,
+    unit = "cm"
+  )) + 
+  t + 
+  coord_cartesian(ylim = c(0, 1)) 
+
+PropP_effectPlot
+
+ggsave(here("Outputs", "Plots", "Final", "EP_proppred_20201027.tiff"), units = "cm", width = 17, height = 15, dpi = 600)
+
+```
+
+## Attitude to vultures plot
+
+```{r Plotting covariate effects ATTITUDE TO VULTURES}
+
+av.data <- m.data %>% filter(., log_Attitude_Total != "NA", Edu_lvl != "NA")
+# Create prediction dataframe
+values.av <- expand.grid(
+log_PercentagePoisoning = med.PPoisoning,
+log_Attitude_Total = c(get.domain.seq(av.data$log_Attitude_Total, 800), med.ATot),
+log_Attitude_Game = med.AGame,
+log_Attitude_Predators = med.APred,
+log_Attitude_Farmworkers = med.Afarw,
+log_PercInc_Cont = med.PInc,
+log_All_largestock = med.LargeS,
+log_All_smallstock = med.SmallS,
+log_All_factoryLS = med.FactoryS,
+log_PropPred_all = med.PPred,
+MainC_PredTop2 = unique(av.data$MainC_PredTop2, na.rm = T),
+log_FreqVult = med.VFreq,
+log_Farm_size_ha = med.FarmS,
+log_Age = med.Age,
+Edu_lvl = unique(av.data$Edu_lvl, na.rm = T),
+Predictions = 0,
+Predictions5y = 0
+)
+
+# create the interval and backtransform
+av.prediction.se  <- predict(global.mod, values.av, re.form=NA, allow.new.levels=TRUE, se.fit=TRUE, interval = "confidence", level =0.95)
+
+av.prediction.df <- with(av.prediction.se, data.frame(log_Attitude_Total = values.av$log_Attitude_Total,
+                                                        rsf.hat = av.prediction.se$fit$fit, 
+                                                        CI.low = av.prediction.se$fit$lwr,
+                                                        CI.high = av.prediction.se$fit$upr))
+
+av5.prediction.se  <- predict(global.mod5, values.av, re.form=NA, allow.new.levels=TRUE, se.fit=TRUE, interval = "confidence", level =0.95)
+
+av5.prediction.df <- with(av5.prediction.se, data.frame(log_Attitude_Total = values.av$log_Attitude_Total,
+                                                        rsf.hat5 = av5.prediction.se$fit$fit, 
+                                                        CI.low5 = av5.prediction.se$fit$lwr,
+                                                        CI.high5 = av5.prediction.se$fit$upr)) 
+
+#add predicted values to values dataframe
+values.av$Predictions <- av.prediction.df$rsf.hat
+values.av$CI.low = av.prediction.df$CI.low
+values.av$CI.high = av.prediction.df$CI.high
+
+values.av$Predictions5y <- av5.prediction.df$rsf.hat5
+values.av$CI.low5 = av5.prediction.df$CI.low5
+values.av$CI.high5 = av5.prediction.df$CI.high5
+
+values.av <- values.av %>% filter(MainC_PredTop2 == "Pred", Edu_lvl == "High") # Subset data so it is only for single levels of your catagoricals
+
+values.av <- gather(values.av, period, pred.prob, Predictions, Predictions5y)
+
+#plot
+AttV_effectPlot <- ggplot(values.av, aes(x = log_Attitude_Total, y = pred.prob)) +
+  geom_line(aes(linetype = period, color = period), size = 1.3) +
+  xlab("Attitude towards vultures\n (ranging from very negative to very positive)") + 
+  ylab("Probability of poisoning") +
+  scale_color_manual(breaks = c("Predictions", "Predictions5y"),
+                     labels = c("One year", "Five years"),
+                    values = c("black", "darkgrey")) +
+  scale_linetype_manual(values=c("solid", "longdash"), labels = c("One year", "Five years")) +
+  guides(color = guide_legend(
+    keywidth=3.4,
+    keyheight = 2,
+    unit = "cm"
+  )) + 
+  t + 
+  coord_cartesian(ylim = c(0, 1)) 
+
+AttV_effectPlot
+
+ggsave(here("Outputs", "Plots", "Final", "EP_VultAttit_20201027.tiff"), units = "cm", width = 17, height = 15, dpi = 600)
+
+```
+
+## Vulture Frequency plot
+
+```{r Plotting covariate effects VULTURE FREQUENCY}
+# Create prediction dataframe
+
+vf.data <- m.data %>% filter(., log_FreqVult != "NA", Edu_lvl != "NA")
+
+values.vf <- expand.grid(
+log_PercentagePoisoning = med.PPoisoning,
+log_Attitude_Total = med.ATot,
+log_Attitude_Game = med.AGame,
+log_Attitude_Predators = med.APred,
+log_Attitude_Farmworkers = med.Afarw,
+log_PercInc_Cont = med.PInc,
+log_All_largestock = med.LargeS,
+log_All_smallstock = med.SmallS, 
+log_All_factoryLS = med.FactoryS,
+log_PropPred_all = med.PPred,
+MainC_PredTop2 = unique(vf.data$MainC_PredTop2, na.rm = T),
+log_FreqVult = c(get.domain.seq(vf.data$log_FreqVult, 800), med.VFreq),
+log_Farm_size_ha = med.FarmS,
+log_Age = med.Age,
+Edu_lvl = unique(vf.data$Edu_lvl, na.rm = T),
+Predictions = 0,
+Predictions5y = 0
+)
+
+# create the interval and backtransform
+vf.prediction.se  <- predict(global.mod, values.vf, re.form=NA, allow.new.levels=TRUE, se.fit=TRUE, interval = "confidence", level =0.95)
+
+
+vf.prediction.df <- with(vf.prediction.se, data.frame(log_PercentagePoisoning = values.vf$log_PercentagePoisoning,
+                                                        rsf.hat = vf.prediction.se$fit$fit, 
+                                                        CI.low = vf.prediction.se$fit$lwr,
+                                                        CI.high = vf.prediction.se$fit$upr))
+
+##################
+
+
+vf5.prediction.se  <- predict(global.mod5, values.vf, re.form=NA, allow.new.levels=TRUE, se.fit=TRUE, interval = "confidence", level =0.95)
+
+vf5.prediction.df <- with(vf5.prediction.se, data.frame(log_PercentagePoisoning = values.vf$log_PercentagePoisoning,
+        rsf.hat5 = vf5.prediction.se$fit$fit,
+        CI.low5 = vf5.prediction.se$fit$lwr,
+        CI.high5 = vf5.prediction.se$fit$upr))
+
+
+#add predicted values to values dataframe
+
+values.vf$Predictions <- vf.prediction.df$rsf.hat
+values.vf$CI.low = vf.prediction.df$CI.low
+values.vf$CI.high = vf.prediction.df$CI.high
+
+############
+
+values.vf$Predictions5y <- vf5.prediction.df$rsf.hat5
+values.vf$CI.low5 = vf5.prediction.df$CI.low5
+values.vf$CI.high5 = vf5.prediction.df$CI.high5
+
+
+values.vf <- values.vf %>% filter(MainC_PredTop2 == "Pred", Edu_lvl == "High") # Subset data so it is only for single levels of your catagoricals
+
+values.vf <- gather(values.vf, period, pred.prob, Predictions, Predictions5y)
+
+#plot
+Vfreq_effectPlot<- ggplot(values.vf, aes(x = log_FreqVult, y = pred.prob)) +
+  geom_line(aes(linetype = period, color = period), size = 1.3) +
+  xlab("Frequency of vulture sightings\n") + 
+  ylab("Probability of poisoning") +
+  scale_color_manual(breaks = c("Predictions", "Predictions5y"),
+                     labels = c("One year", "Five years"),
+                    values = c("black", "darkgrey")) +
+  scale_linetype_manual(values=c("solid", "longdash"), labels = c("One year", "Five years")) +
+  guides(color = guide_legend(
+    keywidth=3.4,
+    keyheight = 2,
+    unit = "cm"
+  )) + 
+  t + 
+  coord_cartesian(ylim = c(0, 1)) 
+
+Vfreq_effectPlot
+
+ggsave(here("Outputs", "Plots", "Final", "EP_VultFreq_20201027.tiff"), units = "cm", width = 17, height = 15, dpi = 600)
+
+```
+
+
+## Attitude to predators plot
+
+```{r Plotting covariate effects ATTITUDE PREDATORS}
+# Create prediction dataframe
+
+attpred.data <- m.data %>% filter(., log_Attitude_Predators != "NA", Edu_lvl != "NA")
+
+values.ap <- expand.grid(
+log_PercentagePoisoning = med.PPoisoning,
+log_Attitude_Total = med.ATot,
+log_Attitude_Game = med.AGame,
+log_Attitude_Predators = c(get.domain.seq(attpred.data$log_Attitude_Predators, 800), med.APred),
+log_Attitude_Farmworkers = med.Afarw,
+log_PercInc_Cont = med.PInc,
+log_All_largestock = med.LargeS,
+log_All_smallstock = med.SmallS, 
+log_All_factoryLS = med.FactoryS,
+log_PropPred_all = med.PPred,
+MainC_PredTop2 = unique(attpred.data$MainC_PredTop2, na.rm = T),
+log_FreqVult = med.VFreq,
+log_Farm_size_ha = med.FarmS,
+log_Age = med.Age,
+Edu_lvl = unique(attpred.data$Edu_lvl, na.rm = T),
+Predictions = 0,
+Predictions5y = 0
+)
+
+# create the interval and backtransform
+ap.prediction.se  <- predict(global.mod, values.ap, re.form=NA, allow.new.levels=TRUE, se.fit=TRUE, interval = "confidence",
+level = 0.95)
+
+ap.prediction.df <- with(ap.prediction.se, data.frame(log_Attitude_Predators = values.ap$log_Attitude_Predators,
+                                                        rsf.hat = ap.prediction.se$fit$fit, 
+                                                        CI.low = ap.prediction.se$fit$lwr,
+                                                        CI.high = ap.prediction.se$fit$upr))
+
+ap5.prediction.se  <- predict(global.mod5, values.ap, re.form=NA, allow.new.levels=TRUE, se.fit=TRUE, interval = "confidence",
+level = 0.95)
+
+ap5.prediction.df <- with(ap5.prediction.se, data.frame(log_Attitude_Predators = values.ap$log_Attitude_Predators,
+        rsf.hat5 = ap5.prediction.se$fit$fit,
+        CI.low5 = ap5.prediction.se$fit$lwr,
+        CI.high5 = ap5.prediction.se$fit$upr))
+
+#add predicted values to values dataframe
+values.ap$Predictions <- ap.prediction.df$rsf.hat
+values.ap$CI.low = ap.prediction.df$CI.low
+values.ap$CI.high = ap.prediction.df$CI.high
+
+values.ap$Predictions5y <- ap5.prediction.df$rsf.hat5
+values.ap$CI.low5 = ap5.prediction.df$CI.low5
+values.ap$CI.high5 = ap5.prediction.df$CI.high5
+
+values.ap <- values.ap %>% filter(MainC_PredTop2 == "Pred", Edu_lvl == "High") # Subset data so it is only for single levels of your catagoricals
+
+values.ap <- gather(values.ap, period, pred.prob, Predictions, Predictions5y)
+
+#plot
+AttPred_effectPlot<- ggplot(values.ap, aes(x = log_Attitude_Predators, y = pred.prob)) +
+  geom_line(aes(linetype = period, color = period), size = 1.3) +
+  xlab("Attitude towards predators \n (ranging from very negative to very positive)") + 
+  ylab("Probability of poisoning") +
+  scale_color_manual(breaks = c("Predictions", "Predictions5y"),
+                     labels = c("One year", "Five years"),
+                    values = c("black", "darkgrey")) +
+  scale_linetype_manual(values=c("solid", "longdash"), labels = c("One year", "Five years")) +
+  guides(color = guide_legend(
+    keywidth=3.4,
+    keyheight = 2,
+    unit = "cm"
+  )) + 
+  t + 
+  coord_cartesian(ylim = c(0, 1)) 
+
+AttPred_effectPlot
+
+ggsave(here("Outputs", "Plots", "Final", "EP_AttPred_20201027.tiff"), units = "cm", width = 17, height = 15, dpi = 600)
+
+```
+
+
+Multipanel plot
+
+```{r Multipanel plot}
+library(gridExtra)
+
+g <- grid.arrange(PercPois_effectPlot, AttV_effectPlot, SmallS_effectPlot, PropP_effectPlot, AttPred_effectPlot, Vfreq_effectPlot,  nrow =3, ncol = 2)
+
+ggsave(here("Outputs", "Plots", "Final", "EP_All_20201027.tiff"), g, units = "cm", width = 34, height = 40, dpi = 600)
+
+
+grid_sum <- ggarrange(PercPois_effectPlot, AttV_effectPlot, SmallS_effectPlot, PropP_effectPlot, AttPred_effectPlot, Vfreq_effectPlot, 
+                      labels = c("A", "B", "C", "D", "E", "F"), 
+                      font.label = list(size = 23, color = "black"),
+          common.legend = TRUE, legend = "bottom", nrow =3, ncol = 2)
+
+grid_sum
+
+ggsave(here("Outputs", "Plots", "Final", "EP_All_20201027D.tiff"), grid_sum, units = "cm", width = 34, height = 40, dpi = 800)
+
+```
+
+## Age plot
+
+```{r Plotting covariate effects AGE}
+# Create prediction dataframe
+
+a.data <- m.data %>% filter(., log_Age != "NA", Edu_lvl != "NA")
+
+values.a <- expand.grid(
+log_PercentagePoisoning = med.PPoisoning,
+log_Attitude_Total = med.ATot,
+log_Attitude_Game = med.AGame,
+log_Attitude_Predators = med.APred,
+log_Attitude_Farmworkers = med.Afarw,
+log_PercInc_Cont = med.PInc,
+log_All_largestock = med.LargeS,
+log_All_smallstock = med.SmallS, 
+log_All_factoryLS = med.FactoryS,
+log_PropPred_all = med.PPred,
+MainC_PredTop2 = unique(a.data$MainC_PredTop2, na.rm = T),
+log_FreqVult = med.VFreq,
+log_Farm_size_ha = med.FarmS,
+log_Age = c(get.domain.seq(a.data$log_Age, 800), med.Age),
+Edu_lvl = unique(pois.data$Edu_lvl, na.rm = T),
+Predictions = 0,
+Predictions5y = 0
+)
+
+
+# create the interval and backtransform
+a.prediction.se  <- predict(global.mod, values.a, re.form=NA, allow.new.levels=TRUE, se.fit=TRUE)
+
+a.prediction.df <- with(a.prediction.se, data.frame(log_Age = values.a$log_Age,
+                                                        rsf.hat = exp(fit)/max(exp(fit)), # back transformed fitted value
+                                                        CI.low = exp(fit - 1.96*se.fit)/max(exp(fit)),
+                                                        CI.high = exp(fit + 1.96*se.fit)/max(exp(fit)))) 
+
+a5.prediction.se  <- predict(global.mod5, values.a, re.form=NA, allow.new.levels=TRUE, se.fit=TRUE)
+
+a5.prediction.df <- with(a5.prediction.se, data.frame(log_Age = values.a$log_Age,
+                                                        rsf.hat5 = exp(fit)/max(exp(fit)), 
+                                                        CI.low5 = exp(fit - 1.96*se.fit)/max(exp(fit)),
+                                                        CI.high5 = exp(fit + 1.96*se.fit)/max(exp(fit)))) 
+
+
+#add predicted values to values dataframe
+values.a$Predictions <- a.prediction.df$rsf.hat
+values.a$CI.low = a.prediction.df$CI.low
+values.a$CI.high = a.prediction.df$CI.high
+
+values.a$Predictions5y <- a5.prediction.df$rsf.hat5
+values.a$CI.low5 = a5.prediction.df$CI.low5
+values.a$CI.high5 = a5.prediction.df$CI.high5
+
+values.a <- values.a %>% filter(MainC_PredTop2 == "Pred", Edu_lvl == "High") # Subset data so it is only for single levels of your catagoricals
+
+#plot
+ggplot(values.a, aes(x=log_Age, y=Predictions)) + 
+  geom_line(colour = "green") +
+  geom_ribbon(data=values.a, aes(ymin=CI.low, ymax=CI.high), alpha=0.1, size=0) + 
+  xlab("Age") + 
+  ylab("Probability of poisoning") +
+  ggtitle("One year") +
+  theme_classic(base_size = 18)
+
+
+Age_effectPlot <- ggplot(values.a, aes(log_Age)) + 
+  geom_line(aes(y = Predictions, colour = "One year")) +
+  geom_ribbon(data=values.a, aes(ymin=CI.low, ymax=CI.high, fill = "One year"), alpha=0.2, size=0) +
+  geom_line(aes(y = Predictions5y, colour = "Five years")) +
+  geom_ribbon(data=values.a, aes(ymin=CI.low5, ymax=CI.high5, fill = "Five years"), alpha=0.2, size=0) + 
+  xlab("Age") + 
+  ylab("Probability of poisoning") +
+  scale_color_discrete(breaks = c("One year", "Five years")) +
+  #scale_color_discrete(labels = c("One year", "Five years")) +
+  guides(fill = FALSE) + 
+  t + 
+  coord_cartesian(ylim = c(0, 1)) 
+
+Age_effectPlot
+
+```
+
+
+## Attitude to farmworkers plot
+
+```{r Plotting covariate effects ATTITUDE FARMWORKERS}
+# Create prediction dataframe
+
+af.data <- m.data %>% filter(., log_Attitude_Farmworkers != "NA", Edu_lvl != "NA")
+
+values.af <- expand.grid(
+log_PercentagePoisoning = med.PPoisoning,
+log_Attitude_Total = med.ATot,
+log_Attitude_Game = med.AGame,
+log_Attitude_Predators = med.APred,
+log_Attitude_Farmworkers = c(get.domain.seq(pois.data$log_PercentagePoisoning, 800), med.Afarw),
+log_PercInc_Cont = med.PInc,
+log_All_largestock = med.LargeS,
+log_All_smallstock = med.SmallS, 
+log_All_factoryLS = med.FactoryS,
+log_PropPred_all = med.PPred,
+MainC_PredTop2 = unique(pois.data$MainC_PredTop2, na.rm = T),
+log_FreqVult = med.VFreq,
+log_Farm_size_ha = med.FarmS,
+log_Age = med.Age,
+Edu_lvl = unique(pois.data$Edu_lvl, na.rm = T),
+Predictions = 0,
+Predictions5y = 0
+)
+
+
+# create the interval and backtransform
+af.prediction.se  <- predict(global.mod, values.af, re.form=NA, allow.new.levels=TRUE, se.fit=TRUE)
+
+af.prediction.df <- with(af.prediction.se, data.frame(log_Attitude_Farmworkers = values.af$log_Attitude_Farmworkers,
+                                                        rsf.hat = exp(fit)/max(exp(fit)), #normalising data - back transformed fitted value
+                                                        CI.low = exp(fit - 1.96*se.fit)/max(exp(fit)),
+                                                        CI.high = exp(fit + 1.96*se.fit)/max(exp(fit)))) 
+
+af5.prediction.se  <- predict(global.mod5, values.af, re.form=NA, allow.new.levels=TRUE, se.fit=TRUE)
+
+af5.prediction.df <- with(af5.prediction.se, data.frame(log_Attitude_Farmworkers = values.af$log_Attitude_Farmworkers,
+                                                        rsf.hat5 = exp(fit)/max(exp(fit)), 
+                                                        CI.low5 = exp(fit - 1.96*se.fit)/max(exp(fit)),
+                                                        CI.high5 = exp(fit + 1.96*se.fit)/max(exp(fit)))) 
+
+
+#add predicted values to values dataframe
+values.af$Predictions <- af.prediction.df$rsf.hat
+values.af$CI.low = af.prediction.df$CI.low
+values.af$CI.high = af.prediction.df$CI.high
+
+values.af$Predictions5y <- af5.prediction.df$rsf.hat5
+values.af$CI.low5 = af5.prediction.df$CI.low5
+values.af$CI.high5 = af5.prediction.df$CI.high5
+
+values.af <- values.af %>% filter(MainC_PredTop2 == "Pred", Edu_lvl == "High") # Subset data so it is only for single levels of your catagoricals
+
+#plot
+ggplot(values.af, aes(x=log_Attitude_Farmworkers, y=Predictions)) + 
+  geom_line(colour = "green") +
+  geom_ribbon(data=values.af, aes(ymin=CI.low, ymax=CI.high), alpha=0.1, size=0) + 
+  xlab("Relationship with farmworkers") + 
+  ylab("Probability of poisoning") +
+  ggtitle("One year") +
+  theme_classic(base_size = 18)
+
+
+AttFarm_effectPlot <- ggplot(values.af, aes(log_Attitude_Farmworkers)) + 
+  geom_line(aes(y = Predictions, colour = "One year")) +
+  geom_ribbon(data=values.af, aes(ymin=CI.low, ymax=CI.high, fill = "One year"), alpha=0.2, size=0) +
+  geom_line(aes(y = Predictions5y, colour = "Five years")) +
+  geom_ribbon(data=values.af, aes(ymin=CI.low5, ymax=CI.high5, fill = "Five years"), alpha=0.2, size=0) + 
+  xlab("Relationship with farmworkers") + 
+  ylab("Probability of poisoning") +
+  scale_color_discrete(breaks = c("One year", "Five years")) +
+  #scale_color_discrete(labels = c("One year", "Five years")) +
+  guides(fill = FALSE) + 
+  t + 
+  coord_cartesian(ylim = c(0, 1)) 
+
+AttFarm_effectPlot
+
+```
+
+# Model predictions
+
+Here we predict the probability that each respondent is using poison for the creation of a poison-use heatmap.
+
+```{r}
+
+# More formal predictions
+# predict(ictreg.object) - function to calculate predictions and uncetainties of predictions from estimates from multivariate regresssion analysis of survey data with the item count technique.
+
+# Last year model
+
+avg.prob.poisoning <- predict(global.mod, se.fit = TRUE, interval = "confidence", level = 0.95, avg = TRUE)
+
+respondent.prob.poisoning <- predict(global.mod, se.fit = TRUE, interval = "confidence", level = 0.95, type ="response")
+x <- respondent.prob.poisoning$fit
+y <-  exp(x)/(1+exp(x))
+
+t <- data.frame(x)
+colnames(t) <- c("ly_ProbPois",  "ly_lwr", "ly_upr")
+
+m.data.prediction <- cbind(m.data, t)
+
+# Five year model
+
+avg.prob.poisoning5 <- predict(global.mod5, se.fit = TRUE, interval = "confidence", level = 0.95, avg = TRUE, type = "response")
+
+respondent.prob.poisoning5 <- predict(global.mod5, se.fit = TRUE, interval = "confidence", level = 0.95)
+x5 <- respondent.prob.poisoning5$fit
+
+t5 <- data.frame(x5)
+colnames(t5) <- c("fy_ProbPois",  "fy_lwr", "fy_upr")
+
+m5.data.prediction <- cbind(m5.data, t5)
+m5.prediction<- m5.data.prediction %>% dplyr::select(Questionnaire_Code, fy_ProbPois, fy_lwr, fy_upr)
+
+
+finaldatasheet <- left_join(m.data.prediction, m5.data.prediction)
+
+write.csv(finaldatasheet, here("Outputs", "Data_output", "Final_all_predictions_20200820.csv"))
+
+finaldatasheet5 <- finaldatasheet %>% filter(., fy_ProbPois != "NA")
+write.csv(finaldatasheet5, here("Outputs", "Data_output", "Final5Y_all_predictions_20200820.csv"))
+
+```
+
+
+# Inverse Distance Weighting for Heat Map
+
+```{r Inverse Distance Interpolatioin}
+
+####################
+# IDW interpolation 
+####################
+
+# load required libraries
+library(gstat);library(sp)
+
+# Last year
+poisprev.map.data <- m.data.prediction #%>% dplyr::select(X, Y, ly_ProbPois)
+
+Prov <- readRDS(here("Data", "Spatial_data", "SA_baseMaps","gadm36_ZAF_1_sf.rds"))
+SA <- readRDS(here("Data", "Spatial_data", "SA_baseMaps", "gadm36_ZAF_0_sf.rds"))
+
+crs(SA)
+crs(poisprev.map.data)
+
+# read data file with coordinates from the whole study area
+# this is a prediction grid, which one can create by rasterizing
+# a shapefile of the study area etc.
+ext <- extent(SA)
+r <- raster(ext, res=0.1)
+r <- rasterize(SA, r, field=1)
+
+plot(r)
+
+studyarea <- r
+
+studyarea <- as(studyarea, "SpatialPixelsDataFrame")
+plot(studyarea)
+
+# convert dataframe with probabilities of occurence into spatialpoints dataframe
+coordinates(poisprev.map.data)<-~X+Y
+
+# convert dataframe with coordinates into a gridded object -------I assume this is not needed as already have the raster object study area?
+coordinates(studyarea) <- ~x + y
+gridded(studyarea) <- TRUE
+
+# perform idw
+idwres <- idw(formula = ly_ProbPois ~ 1, locations = poisprev.map.data, newdata = studyarea)
+
+# get results into a dataframe (only first three columns relevant for mapping)
+
+Heat_1Y <- plot(idwres)
+
+idwres1 <-as.data.frame(idwres)
+
+tiff(here("Outputs", "Plots", "Heat_maps", "PoisonHeat_1Y_20200820.tiff"), units="cm", width=20, height=15, res=1200)
+plot(idwres)
+dev.off()
+
+
+# Five years
+
+poisprev.map.data5 <- m5.data.prediction
+
+# convert dataframe with probabilities of occurence into spatialpoints dataframe
+coordinates(poisprev.map.data5)<-~X+Y
+# perform idw
+idwres5 <- idw(formula = fy_ProbPois ~ 1, locations = poisprev.map.data5, newdata = studyarea)
+
+# get results into a dataframe (only first three columns relevant for mapping)
+
+Heat_5Y <- plot(idwres5)
+
+idwres5 <-as.data.frame(idwres5)
+
+tiff(here("Outputs", "Plots", "Heat_maps", "PoisonHeat_5Y_20200820.tiff"), units="cm", width=20, height=15, res=1200)
+plot(idwres5)
+dev.off()
+
+# Prevalence of poisoning perceptions
+
+#change percentage poisoning to proportion poisoning (so scale is similar to other maps)
+poisprev.map.data <- poisprev.map.data %>% mutate(., PercentagePoisoning_prop = PercentagePoisoning/100)
+
+# convert dataframe with probabilities of occurence into spatialpoints dataframe
+coordinates(poisprev.map.data)<-~X+Y
+
+# perform idw
+idwresPP <- idw(formula = PercentagePoisoning_prop ~ 1, locations = poisprev.map.data, newdata = studyarea)
+
+# get results into a dataframe (only first three columns relevant for mapping)
+
+Heat_PP <- plot(idwresPP)
+
+idwresPP <-as.data.frame(idwresPP)
+
+tiff(here("Outputs", "Plots", "Heat_maps", "PoisonHeat_PP_20200820.tiff"), units="cm", width=20, height=15, res=1200)
+plot(idwresPP)
+dev.off()
+
+```
+
+```{r}
+
+knitr::knit_exit()
+
+```
+
+
